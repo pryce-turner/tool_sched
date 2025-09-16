@@ -7,6 +7,8 @@ import calendar
 import plotly.graph_objects as go
 from plotly.subplots import make_subplots
 import numpy as np
+import io
+from io import BytesIO
 
 # Configuration
 DEFAULT_DOCTORS = ["Dr. Smith", "Dr. Johnson", "Dr. Williams", "Dr. Brown", "Dr. Valdez"]
@@ -153,9 +155,6 @@ def generate_monthly_schedule(year, month, doctors):
             # Find doctors with minimum total shifts
             min_shifts = min(doctor_shifts.values())
             available_doctors = [doctor for doctor, count in doctor_shifts.items() if count == min_shifts]
-
-            # If that still leaves multiple options, prefer those not already working this day
-            # (this would only happen if we really need to assign multiple shifts to same doctor on same day)
 
         # Among available doctors, prioritize those who still need shifts to reach minimum
         doctors_needing_shifts = [doc for doc in available_doctors if doctor_shifts[doc] < min_shifts_per_doctor]
@@ -314,6 +313,89 @@ def display_schedule_table(df):
     )
 
     return filtered_df
+
+def create_excel_export(df, year, month):
+    """Create an Excel file with the schedule data"""
+    # Create a BytesIO buffer
+    buffer = BytesIO()
+
+    with pd.ExcelWriter(buffer, engine='openpyxl') as writer:
+        # Main schedule sheet
+        df.to_excel(writer, sheet_name='Schedule', index=False)
+
+        # Summary sheet
+        summary_data = []
+        shifts_per_doctor = df['Doctor'].value_counts()
+        for doctor, count in shifts_per_doctor.items():
+            summary_data.append({
+                'Doctor': doctor,
+                'Total Shifts': count,
+                'Status': 'Above Minimum' if count > 14 else ('At Minimum' if count == 14 else 'Below Minimum')
+            })
+
+        summary_df = pd.DataFrame(summary_data)
+        summary_df.to_excel(writer, sheet_name='Summary', index=False)
+
+        # Daily view sheet
+        daily_pivot = df.pivot_table(
+            index='Date',
+            columns='Shift',
+            values='Doctor',
+            aggfunc='first',
+            fill_value=''
+        )
+        daily_pivot.to_excel(writer, sheet_name='Daily View')
+
+    buffer.seek(0)
+    return buffer
+
+def create_ics_export(df, year, month):
+    """Create an ICS calendar file with the schedule data"""
+    ics_content = []
+    ics_content.append("BEGIN:VCALENDAR")
+    ics_content.append("VERSION:2.0")
+    ics_content.append("PRODID:-//Medical Scheduling App//EN")
+    ics_content.append("CALSCALE:GREGORIAN")
+    ics_content.append("METHOD:PUBLISH")
+
+    for _, row in df.iterrows():
+        # Parse the date and times
+        event_date = datetime.strptime(row['Date'], '%Y-%m-%d')
+
+        # Parse start time
+        start_time_str = row['Start_Time']
+        start_hour, start_minute = map(int, start_time_str.split(':'))
+        start_dt = event_date.replace(hour=start_hour, minute=start_minute)
+
+        # Parse end time (handle overnight shifts)
+        end_time_str = row['End_Time']
+        end_hour, end_minute = map(int, end_time_str.split(':'))
+        end_dt = event_date.replace(hour=end_hour, minute=end_minute)
+
+        # If end time is earlier than start time, it's next day
+        if end_dt <= start_dt:
+            end_dt += timedelta(days=1)
+
+        # Format for ICS (UTC format)
+        start_utc = start_dt.strftime('%Y%m%dT%H%M%S')
+        end_utc = end_dt.strftime('%Y%m%dT%H%M%S')
+
+        # Create unique ID for the event
+        uid = f"{row['Date']}-{row['Shift']}-{row['Doctor'].replace(' ', '')}-{hash(row['Doctor'] + row['Date'] + row['Shift'])}"
+
+        # Add event
+        ics_content.append("BEGIN:VEVENT")
+        ics_content.append(f"UID:{uid}")
+        ics_content.append(f"DTSTART:{start_utc}")
+        ics_content.append(f"DTEND:{end_utc}")
+        ics_content.append(f"SUMMARY:{row['Doctor']} - {row['Shift']} Shift")
+        ics_content.append(f"DESCRIPTION:Medical shift assignment for {row['Doctor']} on {row['Day']}")
+        ics_content.append(f"LOCATION:Hospital")
+        ics_content.append("END:VEVENT")
+
+    ics_content.append("END:VCALENDAR")
+
+    return '\n'.join(ics_content)
 
 def handle_shift_swaps():
     """Handle shift swap requests between doctors"""
@@ -570,14 +652,39 @@ def main():
         with tab2:
             filtered_df = display_schedule_table(st.session_state.schedule_df)
 
-            # Download option
-            csv = filtered_df.to_csv(index=False)
-            st.download_button(
-                label="Download Schedule as CSV",
-                data=csv,
-                file_name=f"schedule_{selected_year}_{selected_month:02d}.csv",
-                mime="text/csv"
-            )
+            # Export options
+            st.subheader("Export Options")
+            col1, col2, col3 = st.columns(3)
+
+            with col1:
+                # CSV export
+                csv = filtered_df.to_csv(index=False)
+                st.download_button(
+                    label="📄 Download as CSV",
+                    data=csv,
+                    file_name=f"schedule_{selected_year}_{selected_month:02d}.csv",
+                    mime="text/csv"
+                )
+
+            with col2:
+                # Excel export
+                excel_buffer = create_excel_export(st.session_state.schedule_df, selected_year, selected_month)
+                st.download_button(
+                    label="📊 Download as Excel",
+                    data=excel_buffer,
+                    file_name=f"schedule_{selected_year}_{selected_month:02d}.xlsx",
+                    mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+                )
+
+            with col3:
+                # ICS calendar export
+                ics_content = create_ics_export(st.session_state.schedule_df, selected_year, selected_month)
+                st.download_button(
+                    label="📅 Download as Calendar",
+                    data=ics_content,
+                    file_name=f"schedule_{selected_year}_{selected_month:02d}.ics",
+                    mime="text/calendar"
+                )
 
         with tab3:
             handle_shift_swaps()
