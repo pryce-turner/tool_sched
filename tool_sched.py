@@ -308,7 +308,7 @@ def display_schedule_table(df):
     # Display the filtered table
     st.dataframe(
         filtered_df,
-        use_container_width=True,
+        width=True,
         hide_index=True
     )
 
@@ -346,6 +346,60 @@ def create_excel_export(df, year, month):
         )
         daily_pivot.to_excel(writer, sheet_name='Daily View')
 
+        # Calendar view sheet
+        cal = calendar.monthcalendar(year, month)
+        month_name = calendar.month_name[month]
+
+        # Create calendar data structure
+        calendar_data = []
+        day_names = ['Monday', 'Tuesday', 'Wednesday', 'Thursday', 'Friday', 'Saturday', 'Sunday']
+
+        # Add header row
+        calendar_data.append([''] + day_names)
+
+        # Process each week
+        for week_num, week in enumerate(cal):
+            week_data = [f'Week {week_num + 1}']
+
+            for day in week:
+                if day == 0:
+                    week_data.append('')
+                else:
+                    # Get shifts for this day
+                    day_date = datetime(year, month, day).strftime("%Y-%m-%d")
+                    day_shifts = df[df['Date'] == day_date]
+
+                    # Create cell content with day number and shifts
+                    cell_content = f"{day}\n"
+
+                    if not day_shifts.empty:
+                        for _, shift in day_shifts.iterrows():
+                            cell_content += f"{shift['Shift']}: {shift['Doctor']}\n"
+
+                    week_data.append(cell_content.strip())
+
+            calendar_data.append(week_data)
+
+        # Create DataFrame and export
+        calendar_df = pd.DataFrame(calendar_data[1:], columns=calendar_data[0])
+        calendar_df.to_excel(writer, sheet_name='Calendar View', index=False)
+
+        # Format the calendar sheet
+        workbook = writer.book
+        calendar_sheet = writer.sheets['Calendar View']
+
+        # Set column widths
+        for col in range(1, 8):  # Columns B through H (days of week)
+            calendar_sheet.column_dimensions[chr(65 + col)].width = 20
+
+        # Set row heights and enable text wrapping
+        for row in range(2, len(calendar_data) + 1):
+            calendar_sheet.row_dimensions[row].height = 80
+            for col in range(1, 8):
+                cell = calendar_sheet.cell(row=row, column=col + 1)
+                from openpyxl.styles import Alignment
+                cell.alignment = Alignment(wrap_text=True, vertical='top')
+
     buffer.seek(0)
     return buffer
 
@@ -354,7 +408,7 @@ def create_ics_export(df, year, month):
     ics_content = []
     ics_content.append("BEGIN:VCALENDAR")
     ics_content.append("VERSION:2.0")
-    ics_content.append("PRODID:-//Medical Scheduling App//EN")
+    ics_content.append("PRODID:-//Tool Sched//EN")
     ics_content.append("CALSCALE:GREGORIAN")
     ics_content.append("METHOD:PUBLISH")
 
@@ -389,8 +443,8 @@ def create_ics_export(df, year, month):
         ics_content.append(f"DTSTART:{start_utc}")
         ics_content.append(f"DTEND:{end_utc}")
         ics_content.append(f"SUMMARY:{row['Doctor']} - {row['Shift']} Shift")
-        ics_content.append(f"DESCRIPTION:Medical shift assignment for {row['Doctor']} on {row['Day']}")
-        ics_content.append(f"LOCATION:Hospital")
+        ics_content.append(f"DESCRIPTION:Shift assignment for {row['Doctor']} on {row['Day']}")
+        ics_content.append(f"LOCATION:Workplace")
         ics_content.append("END:VEVENT")
 
     ics_content.append("END:VCALENDAR")
@@ -534,43 +588,43 @@ def execute_swap(swap_index):
 
 def main():
     st.set_page_config(
-        page_title="Medical Scheduling App",
-        page_icon="🏥",
+        page_title="Tool Sched",
+        page_icon="🛠️",
         layout="wide"
     )
 
-    st.title("🏥 Medical Scheduling App")
-    st.write("Collaborative scheduling system for medical staff")
+    st.title("🛠️ Tool Sched")
+    st.write("Collaborative scheduling system for any team")
 
     initialize_session_state()
 
     # Sidebar for schedule generation
     with st.sidebar:
-        st.header("Doctor Configuration")
+        st.header("Team Configuration")
 
         # Doctor input section
-        st.subheader("Add Doctors")
+        st.subheader("Add Team Members")
 
         # Option to use defaults or start fresh
-        if st.button("Load Default Doctors"):
+        if st.button("Load Default Team"):
             st.session_state.doctors = DEFAULT_DOCTORS.copy()
             st.session_state.doctor_colors = generate_random_colors(st.session_state.doctors)
             st.rerun()
 
         # Manual doctor entry
-        new_doctor = st.text_input("Add Doctor Name:", placeholder="e.g., Dr. Johnson")
-        if st.button("Add Doctor") and new_doctor.strip():
+        new_doctor = st.text_input("Add Team Member Name:", placeholder="e.g., Dr. Johnson")
+        if st.button("Add Team Member") and new_doctor.strip():
             if new_doctor.strip() not in st.session_state.doctors:
                 st.session_state.doctors.append(new_doctor.strip())
                 st.session_state.doctor_colors = generate_random_colors(st.session_state.doctors)
                 st.success(f"Added {new_doctor.strip()}")
                 st.rerun()
             else:
-                st.warning("Doctor already exists!")
+                st.warning("Team member already exists!")
 
         # Display current doctors with remove option
         if st.session_state.doctors:
-            st.subheader("Current Doctors")
+            st.subheader("Current Team Members")
             for i, doctor in enumerate(st.session_state.doctors):
                 col1, col2 = st.columns([3, 1])
                 with col1:
@@ -591,7 +645,7 @@ def main():
 
         # Check if we have enough doctors
         if len(st.session_state.doctors) < 2:
-            st.warning("⚠️ Add at least 2 doctors before generating schedule")
+            st.warning("⚠️ Add at least 2 team members before generating schedule")
             schedule_generation_disabled = True
         else:
             schedule_generation_disabled = False
@@ -627,14 +681,14 @@ def main():
 
         # Display configuration
         st.header("Configuration")
-        st.write(f"**Total Doctors:** {len(st.session_state.doctors)}")
+        st.write(f"**Total Team Members:** {len(st.session_state.doctors)}")
 
         st.write("**Shift Types:**")
         st.write("• **Mon-Thu:** 7a-7p, 12p-12a")
         st.write("• **Fri-Sun:** 7a-7p, 10a-10p, 2p-2a, 7p-7a")
 
         st.write("**Requirements:**")
-        st.write("• Minimum 14 shifts per doctor")
+        st.write("• Minimum 14 shifts per team member")
         st.write("• 24/7 coverage")
         st.write("• 12-hour shifts")
         st.write("• Additional shifts added if needed")
@@ -715,12 +769,12 @@ def main():
         col1, col2, col3 = st.columns(3)
 
         with col1:
-            st.write("**👥 Configurable Doctors**")
-            st.write("Add your own doctors with automatically assigned random colors")
+            st.write("**👥 Configurable Team**")
+            st.write("Add your own team members with automatically assigned random colors")
 
         with col2:
             st.write("**🔄 Shift Swapping**")
-            st.write("Doctors can request to exchange shifts with colleagues")
+            st.write("Team members can request to exchange shifts with colleagues")
 
         with col3:
             st.write("**📊 Analytics**")
