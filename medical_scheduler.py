@@ -86,6 +86,8 @@ def generate_monthly_schedule(year, month, doctors):
 
     # Initialize shift counters for each doctor
     doctor_shifts = {doctor: 0 for doctor in doctors}
+    # Track which doctors are assigned on which days to prevent double-booking
+    doctor_daily_assignments = defaultdict(set)  # {date: {doctors assigned that day}}
 
     # Create all regular shift slots
     shift_slots = []
@@ -133,45 +135,47 @@ def generate_monthly_schedule(year, month, doctors):
                 'is_additional': True
             })
 
-    # Shuffle shift slots for random assignment
-    random.shuffle(shift_slots)
+    # Sort shift slots by date for better assignment distribution
+    shift_slots.sort(key=lambda x: x['Date'])
 
     schedule_data = []
 
-    # Phase 1: Give everyone exactly the minimum (14 shifts)
-    shifts_assigned = 0
-    doctor_index = 0
-
-    # Assign 14 shifts to each doctor in round-robin fashion
+    # Assign shifts one by one, ensuring no doctor works multiple shifts per day
     for shift_slot in shift_slots:
-        if all(count >= min_shifts_per_doctor for count in doctor_shifts.values()):
-            break
+        shift_date = shift_slot['Date']
 
-        # Find next doctor who needs shifts
-        while doctor_shifts[doctors[doctor_index]] >= min_shifts_per_doctor:
-            doctor_index = (doctor_index + 1) % len(doctors)
+        # Get doctors who are NOT already assigned on this day
+        available_doctors = [doc for doc in doctors if doc not in doctor_daily_assignments[shift_date]]
 
-        assigned_doctor = doctors[doctor_index]
+        # If all doctors are already assigned this day, we need to allow double shifts
+        # But prioritize doctors with fewer total shifts
+        if not available_doctors:
+            # Find doctors with minimum total shifts
+            min_shifts = min(doctor_shifts.values())
+            available_doctors = [doctor for doctor, count in doctor_shifts.items() if count == min_shifts]
+
+            # If that still leaves multiple options, prefer those not already working this day
+            # (this would only happen if we really need to assign multiple shifts to same doctor on same day)
+
+        # Among available doctors, prioritize those who still need shifts to reach minimum
+        doctors_needing_shifts = [doc for doc in available_doctors if doctor_shifts[doc] < min_shifts_per_doctor]
+
+        if doctors_needing_shifts:
+            # Assign to a doctor who needs more shifts and isn't working this day
+            assigned_doctor = random.choice(doctors_needing_shifts)
+        else:
+            # All doctors have minimum, assign to available doctor with fewest shifts
+            if available_doctors:
+                min_shifts_among_available = min(doctor_shifts[doc] for doc in available_doctors)
+                best_candidates = [doc for doc in available_doctors if doctor_shifts[doc] == min_shifts_among_available]
+                assigned_doctor = random.choice(best_candidates)
+            else:
+                # This shouldn't happen with proper logic, but fallback
+                assigned_doctor = random.choice(doctors)
+
+        # Assign the shift
         doctor_shifts[assigned_doctor] += 1
-
-        shift_slot['Doctor'] = assigned_doctor
-        schedule_data.append(shift_slot)
-        shifts_assigned += 1
-
-        # Move to next doctor
-        doctor_index = (doctor_index + 1) % len(doctors)
-
-    # Phase 2: Distribute remaining shifts as evenly as possible
-    remaining_slots = shift_slots[shifts_assigned:]
-
-    for shift_slot in remaining_slots:
-        # Find doctor(s) with minimum shifts among those who have at least 14
-        min_shifts = min(doctor_shifts.values())
-        doctors_with_min = [doctor for doctor, count in doctor_shifts.items() if count == min_shifts]
-
-        # Assign to a random doctor from those with minimum shifts
-        assigned_doctor = random.choice(doctors_with_min)
-        doctor_shifts[assigned_doctor] += 1
+        doctor_daily_assignments[shift_date].add(assigned_doctor)
 
         shift_slot['Doctor'] = assigned_doctor
         schedule_data.append(shift_slot)
