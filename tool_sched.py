@@ -13,17 +13,45 @@ from io import BytesIO
 # Configuration
 DEFAULT_DOCTORS = ["Dr. Smith", "Dr. Johnson", "Dr. Williams", "Dr. Brown", "Dr. Valdez"]
 
-# Shift types by day of week
-WEEKDAY_SHIFTS = {
-    "7a-7p": {"start": "07:00", "end": "19:00", "hours": 12},
-    "12p-12a": {"start": "12:00", "end": "00:00", "hours": 12}
-}
-
-WEEKEND_SHIFTS = {
-    "7a-7p": {"start": "07:00", "end": "19:00", "hours": 12},
-    "10a-10p": {"start": "10:00", "end": "22:00", "hours": 12},
-    "2p-2a": {"start": "14:00", "end": "02:00", "hours": 12},
-    "7p-7a": {"start": "19:00", "end": "07:00", "hours": 12}
+# Default shift configurations by day of week
+DEFAULT_SHIFTS = {
+    "Monday": {
+        "7a-7p": {"start": "07:00", "end": "19:00", "hours": 12},
+        "12p-12a": {"start": "12:00", "end": "00:00", "hours": 12},
+        "7p-7a": {"start": "19:00", "end": "07:00", "hours": 12}
+    },
+    "Tuesday": {
+        "7a-7p": {"start": "07:00", "end": "19:00", "hours": 12},
+        "12p-12a": {"start": "12:00", "end": "00:00", "hours": 12}
+    },
+    "Wednesday": {
+        "7a-7p": {"start": "07:00", "end": "19:00", "hours": 12},
+        "12p-12a": {"start": "12:00", "end": "00:00", "hours": 12},
+        "7p-7a": {"start": "19:00", "end": "07:00", "hours": 12}
+    },
+    "Thursday": {
+        "7a-7p": {"start": "07:00", "end": "19:00", "hours": 12},
+        "12p-12a": {"start": "12:00", "end": "00:00", "hours": 12},
+        "7p-7a": {"start": "19:00", "end": "07:00", "hours": 12}
+    },
+    "Friday": {
+        "7a-7p": {"start": "07:00", "end": "19:00", "hours": 12},
+        "10a-10p": {"start": "10:00", "end": "22:00", "hours": 12},
+        "2p-2a": {"start": "14:00", "end": "02:00", "hours": 12},
+        "7p-7a": {"start": "19:00", "end": "07:00", "hours": 12}
+    },
+    "Saturday": {
+        "7a-7p": {"start": "07:00", "end": "19:00", "hours": 12},
+        "10a-10p": {"start": "10:00", "end": "22:00", "hours": 12},
+        "2p-2a": {"start": "14:00", "end": "02:00", "hours": 12},
+        "7p-7a": {"start": "19:00", "end": "07:00", "hours": 12}
+    },
+    "Sunday": {
+        "7a-7p": {"start": "07:00", "end": "19:00", "hours": 12},
+        "10a-10p": {"start": "10:00", "end": "22:00", "hours": 12},
+        "2p-2a": {"start": "14:00", "end": "02:00", "hours": 12},
+        "7p-7a": {"start": "19:00", "end": "07:00", "hours": 12}
+    }
 }
 
 def initialize_session_state():
@@ -38,13 +66,15 @@ def initialize_session_state():
         st.session_state.doctors = []
     if 'doctor_colors' not in st.session_state:
         st.session_state.doctor_colors = {}
+    if 'shift_config' not in st.session_state:
+        st.session_state.shift_config = DEFAULT_SHIFTS.copy()
 
 def generate_random_colors(doctors):
     """Generate random colors for doctors"""
     colors = [
         "#FF6B6B", "#4ECDC4", "#45B7D1", "#96CEB4", "#FECA57",
-        "#FF9FF3", "#54A0FF", "#5F27CD", "#00D2D3", "#FF9F43",
-        "#10AC84", "#EE5A24", "#0984E3", "#A29BFE", "#FD79A8",
+        "#8E44AD", "#54A0FF", "#5F27CD", "#00D2D3", "#FF9F43",
+        "#10AC84", "#EE5A24", "#0984E3", "#A29BFE", "#2ECC71",
         "#FDCB6E", "#6C5CE7", "#74B9FF", "#00B894", "#E17055"
     ]
 
@@ -55,19 +85,15 @@ def generate_random_colors(doctors):
     for i, doctor in enumerate(doctors):
         doctor_colors[doctor] = colors[i % len(colors)]
 
+    if doctor_colors.get("Dr. Valdez"):
+        doctor_colors["Dr. Valdez"] = "#FD79A8"
+
     return doctor_colors
 
 def get_shifts_for_day(date):
-    """Get available shifts for a given date based on day of week"""
-    # Monday = 0, Sunday = 6
-    day_of_week = date.weekday()
-
-    # Mon-Thu (0-3): weekday shifts
-    if day_of_week <= 3:
-        return WEEKDAY_SHIFTS
-    # Fri-Sun (4-6): weekend shifts
-    else:
-        return WEEKEND_SHIFTS
+    """Get available shifts for a given date based on configured shifts"""
+    day_name = date.strftime("%A")
+    return st.session_state.shift_config.get(day_name, {})
 
 def generate_monthly_schedule(year, month, doctors):
     """Generate a schedule for the specified month ensuring minimum 14 shifts per doctor"""
@@ -113,7 +139,9 @@ def generate_monthly_schedule(year, month, doctors):
         st.info(f"Adding {additional_shifts_needed} additional shifts to meet minimum requirements")
 
         # Get all possible shift types
-        all_shift_types = list(WEEKDAY_SHIFTS.keys()) + list(WEEKEND_SHIFTS.keys())
+        all_shift_types = []
+        for day_shifts in st.session_state.shift_config.values():
+            all_shift_types.extend(day_shifts.keys())
         all_shift_types = list(set(all_shift_types))  # Remove duplicates
 
         for _ in range(additional_shifts_needed):
@@ -122,11 +150,19 @@ def generate_monthly_schedule(year, month, doctors):
             random_date = datetime(year, month, random_day)
             random_shift_type = random.choice(all_shift_types)
 
-            # Get shift details
-            if random_shift_type in WEEKDAY_SHIFTS:
-                shift_details = WEEKDAY_SHIFTS[random_shift_type]
+            # Get shift details from the day's configuration
+            day_name = random_date.strftime("%A")
+            day_shifts = st.session_state.shift_config.get(day_name, {})
+
+            if random_shift_type in day_shifts:
+                shift_details = day_shifts[random_shift_type]
             else:
-                shift_details = WEEKEND_SHIFTS[random_shift_type]
+                # Fallback to first available shift type for that day
+                if day_shifts:
+                    random_shift_type = list(day_shifts.keys())[0]
+                    shift_details = day_shifts[random_shift_type]
+                else:
+                    continue  # Skip if no shifts defined for this day
 
             shift_slots.append({
                 'Date': random_date.strftime("%Y-%m-%d"),
@@ -308,7 +344,7 @@ def display_schedule_table(df):
     # Display the filtered table
     st.dataframe(
         filtered_df,
-        width=True,
+        use_container_width=True,
         hide_index=True
     )
 
@@ -641,11 +677,144 @@ def main():
                 st.rerun()
 
         st.divider()
+
+        # Shift Configuration Section
+        st.header("Shift Configuration")
+
+        if st.button("Reset to Default Shifts"):
+            st.session_state.shift_config = DEFAULT_SHIFTS.copy()
+            st.success("Shifts reset to defaults!")
+            st.rerun()
+
+        # Configurable shift editor
+        st.subheader("Edit Shifts by Day")
+
+        for day_name in ["Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday", "Sunday"]:
+            with st.expander(f"📅 {day_name} Shifts"):
+                day_shifts = st.session_state.shift_config.get(day_name, {})
+
+                # Display existing shifts with edit/delete options
+                shifts_to_remove = []
+                updated_shifts = {}
+
+                for i, (shift_name, shift_details) in enumerate(day_shifts.items()):
+                    col1, col2, col3, col4 = st.columns([2, 1, 1, 1])
+
+                    with col1:
+                        new_shift_name = st.text_input(f"Shift Name", value=shift_name, key=f"{day_name}_name_{i}")
+                    with col2:
+                        new_start = st.text_input(f"Start", value=shift_details['start'], key=f"{day_name}_start_{i}", help="HH:MM format")
+                    with col3:
+                        new_end = st.text_input(f"End", value=shift_details['end'], key=f"{day_name}_end_{i}", help="HH:MM format")
+                    with col4:
+                        if st.button("🗑️", key=f"{day_name}_delete_{i}", help="Delete shift"):
+                            shifts_to_remove.append(shift_name)
+
+                    # Validate time format
+                    try:
+                        datetime.strptime(new_start, '%H:%M')
+                        datetime.strptime(new_end, '%H:%M')
+
+                        # Calculate hours (handle overnight shifts)
+                        start_dt = datetime.strptime(new_start, '%H:%M')
+                        end_dt = datetime.strptime(new_end, '%H:%M')
+                        if end_dt <= start_dt:
+                            # Overnight shift
+                            hours = 24 - (start_dt.hour - end_dt.hour) - (start_dt.minute - end_dt.minute) / 60
+                        else:
+                            hours = (end_dt.hour - start_dt.hour) + (end_dt.minute - start_dt.minute) / 60
+
+                        updated_shifts[new_shift_name] = {
+                            "start": new_start,
+                            "end": new_end,
+                            "hours": round(hours, 1)
+                        }
+                    except ValueError:
+                        st.error(f"Invalid time format for {shift_name}. Use HH:MM format (e.g., 07:00)")
+
+                # Add new shift section
+                st.write("**Add New Shift:**")
+                col1, col2, col3, col4 = st.columns([2, 1, 1, 1])
+
+                with col1:
+                    new_shift_name = st.text_input("New Shift Name", key=f"{day_name}_new_name", placeholder="e.g., 6a-6p")
+                with col2:
+                    new_shift_start = st.text_input("Start Time", key=f"{day_name}_new_start", placeholder="06:00")
+                with col3:
+                    new_shift_end = st.text_input("End Time", key=f"{day_name}_new_end", placeholder="18:00")
+                with col4:
+                    if st.button("➕ Add", key=f"{day_name}_add"):
+                        if new_shift_name and new_shift_start and new_shift_end:
+                            try:
+                                datetime.strptime(new_shift_start, '%H:%M')
+                                datetime.strptime(new_shift_end, '%H:%M')
+
+                                # Calculate hours
+                                start_dt = datetime.strptime(new_shift_start, '%H:%M')
+                                end_dt = datetime.strptime(new_shift_end, '%H:%M')
+                                if end_dt <= start_dt:
+                                    hours = 24 - (start_dt.hour - end_dt.hour) - (start_dt.minute - end_dt.minute) / 60
+                                else:
+                                    hours = (end_dt.hour - start_dt.hour) + (end_dt.minute - start_dt.minute) / 60
+
+                                updated_shifts[new_shift_name] = {
+                                    "start": new_shift_start,
+                                    "end": new_shift_end,
+                                    "hours": round(hours, 1)
+                                }
+                                st.success(f"Added {new_shift_name} shift!")
+                                st.rerun()
+                            except ValueError:
+                                st.error("Invalid time format. Use HH:MM format (e.g., 07:00)")
+                        else:
+                            st.error("Please fill in all fields")
+
+                # Apply changes
+                for shift_to_remove in shifts_to_remove:
+                    if shift_to_remove in day_shifts:
+                        del day_shifts[shift_to_remove]
+
+                # Update with modified shifts
+                for shift_name, shift_data in updated_shifts.items():
+                    day_shifts[shift_name] = shift_data
+
+                st.session_state.shift_config[day_name] = day_shifts
+
+                # Show summary for this day
+                if day_shifts:
+                    st.write("**Current shifts:**")
+                    for shift_name, shift_details in day_shifts.items():
+                        st.write(f"• {shift_name}: {shift_details['start']} - {shift_details['end']} ({shift_details['hours']}h)")
+                else:
+                    st.write("No shifts configured for this day")
+
+        # Validation summary
+        st.subheader("📊 Configuration Summary")
+        total_shifts_week = 0
+        for day_name, day_shifts in st.session_state.shift_config.items():
+            shift_count = len(day_shifts)
+            total_shifts_week += shift_count
+            if shift_count == 0:
+                st.warning(f"⚠️ {day_name}: No shifts configured")
+            else:
+                st.info(f"✅ {day_name}: {shift_count} shifts")
+
+        st.write(f"**Total shifts per week:** {total_shifts_week}")
+
+        if total_shifts_week == 0:
+            st.error("❌ No shifts configured. Please add shifts before generating schedule.")
+
+        st.divider()
         st.header("Schedule Generation")
 
-        # Check if we have enough doctors
+        # Check if we have enough doctors and shifts
+        total_shifts_configured = sum(len(day_shifts) for day_shifts in st.session_state.shift_config.values())
+
         if len(st.session_state.doctors) < 2:
             st.warning("⚠️ Add at least 2 team members before generating schedule")
+            schedule_generation_disabled = True
+        elif total_shifts_configured == 0:
+            st.warning("⚠️ Configure at least one shift before generating schedule")
             schedule_generation_disabled = True
         else:
             schedule_generation_disabled = False
@@ -684,7 +853,8 @@ def main():
         st.write(f"**Total Team Members:** {len(st.session_state.doctors)}")
 
         st.write("**Shift Types:**")
-        st.write("• **Mon-Thu:** 7a-7p, 12p-12a")
+        st.write("• **Mon, Wed, Thu:** 7a-7p, 12p-12a, 7p-7a")
+        st.write("• **Tue:** 7a-7p, 12p-12a (no overnight)")
         st.write("• **Fri-Sun:** 7a-7p, 10a-10p, 2p-2a, 7p-7a")
 
         st.write("**Requirements:**")
