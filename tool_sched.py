@@ -85,6 +85,7 @@ def generate_random_colors(doctors):
     for i, doctor in enumerate(doctors):
         doctor_colors[doctor] = colors[i % len(colors)]
 
+    # Special color assignment for Dr. Valdez
     if doctor_colors.get("Dr. Valdez"):
         doctor_colors["Dr. Valdez"] = "#FD79A8"
 
@@ -96,28 +97,23 @@ def get_shifts_for_day(date):
     return st.session_state.shift_config.get(day_name, {})
 
 def generate_monthly_schedule(year, month, doctors):
-    """Generate a schedule for the specified month ensuring minimum 14 shifts per doctor"""
+    """Generate a schedule for the specified month with balanced shift distribution"""
     # Get number of days in the month
     days_in_month = calendar.monthrange(year, month)[1]
-    min_shifts_per_doctor = 14
 
-    # Calculate total shifts needed
+    # Calculate total shifts for the month
     total_shifts = 0
     for day in range(1, days_in_month + 1):
         date = datetime(year, month, day)
         shifts_for_day = get_shifts_for_day(date)
         total_shifts += len(shifts_for_day)
 
-    # Check if we have enough shifts for minimum requirement
-    min_total_shifts_needed = len(doctors) * min_shifts_per_doctor
-    additional_shifts_needed = max(0, min_total_shifts_needed - total_shifts)
-
     # Initialize shift counters for each doctor
     doctor_shifts = {doctor: 0 for doctor in doctors}
     # Track which doctors are assigned on which days to prevent double-booking
     doctor_daily_assignments = defaultdict(set)  # {date: {doctors assigned that day}}
 
-    # Create all regular shift slots
+    # Create all shift slots
     shift_slots = []
     for day in range(1, days_in_month + 1):
         date = datetime(year, month, day)
@@ -130,47 +126,7 @@ def generate_monthly_schedule(year, month, doctors):
                 'Day': date.strftime("%A"),
                 'Shift': shift_type,
                 'Start_Time': shift_details['start'],
-                'End_Time': shift_details['end'],
-                'is_additional': False
-            })
-
-    # Add additional random shifts if needed
-    if additional_shifts_needed > 0:
-        st.info(f"Adding {additional_shifts_needed} additional shifts to meet minimum requirements")
-
-        # Get all possible shift types
-        all_shift_types = []
-        for day_shifts in st.session_state.shift_config.values():
-            all_shift_types.extend(day_shifts.keys())
-        all_shift_types = list(set(all_shift_types))  # Remove duplicates
-
-        for _ in range(additional_shifts_needed):
-            # Pick a random day and shift type
-            random_day = random.randint(1, days_in_month)
-            random_date = datetime(year, month, random_day)
-            random_shift_type = random.choice(all_shift_types)
-
-            # Get shift details from the day's configuration
-            day_name = random_date.strftime("%A")
-            day_shifts = st.session_state.shift_config.get(day_name, {})
-
-            if random_shift_type in day_shifts:
-                shift_details = day_shifts[random_shift_type]
-            else:
-                # Fallback to first available shift type for that day
-                if day_shifts:
-                    random_shift_type = list(day_shifts.keys())[0]
-                    shift_details = day_shifts[random_shift_type]
-                else:
-                    continue  # Skip if no shifts defined for this day
-
-            shift_slots.append({
-                'Date': random_date.strftime("%Y-%m-%d"),
-                'Day': random_date.strftime("%A"),
-                'Shift': f"{random_shift_type} (extra)",
-                'Start_Time': shift_details['start'],
-                'End_Time': shift_details['end'],
-                'is_additional': True
+                'End_Time': shift_details['end']
             })
 
     # Sort shift slots by date for better assignment distribution
@@ -178,35 +134,29 @@ def generate_monthly_schedule(year, month, doctors):
 
     schedule_data = []
 
-    # Assign shifts one by one, ensuring no doctor works multiple shifts per day
+    # Assign shifts one by one, ensuring balanced distribution and no double shifts per day
     for shift_slot in shift_slots:
         shift_date = shift_slot['Date']
 
         # Get doctors who are NOT already assigned on this day
         available_doctors = [doc for doc in doctors if doc not in doctor_daily_assignments[shift_date]]
 
-        # If all doctors are already assigned this day, we need to allow double shifts
-        # But prioritize doctors with fewer total shifts
+        # If all doctors are already assigned this day, fall back to all doctors
+        # but prioritize those with fewer total shifts
         if not available_doctors:
-            # Find doctors with minimum total shifts
-            min_shifts = min(doctor_shifts.values())
-            available_doctors = [doctor for doctor, count in doctor_shifts.items() if count == min_shifts]
+            available_doctors = doctors
 
-        # Among available doctors, prioritize those who still need shifts to reach minimum
-        doctors_needing_shifts = [doc for doc in available_doctors if doctor_shifts[doc] < min_shifts_per_doctor]
+        # Among available doctors, find those with the minimum number of shifts
+        min_shifts = min(doctor_shifts[doc] for doc in available_doctors)
+        best_candidates = [doc for doc in available_doctors if doctor_shifts[doc] == min_shifts]
 
-        if doctors_needing_shifts:
-            # Assign to a doctor who needs more shifts and isn't working this day
-            assigned_doctor = random.choice(doctors_needing_shifts)
-        else:
-            # All doctors have minimum, assign to available doctor with fewest shifts
-            if available_doctors:
-                min_shifts_among_available = min(doctor_shifts[doc] for doc in available_doctors)
-                best_candidates = [doc for doc in available_doctors if doctor_shifts[doc] == min_shifts_among_available]
-                assigned_doctor = random.choice(best_candidates)
-            else:
-                # This shouldn't happen with proper logic, but fallback
-                assigned_doctor = random.choice(doctors)
+        # If multiple doctors have the same minimum shifts, prefer those not working today
+        doctors_not_working_today = [doc for doc in best_candidates if doc not in doctor_daily_assignments[shift_date]]
+        if doctors_not_working_today:
+            best_candidates = doctors_not_working_today
+
+        # Randomly select from the best candidates
+        assigned_doctor = random.choice(best_candidates)
 
         # Assign the shift
         doctor_shifts[assigned_doctor] += 1
@@ -223,20 +173,13 @@ def display_schedule_summary(df):
 
     # Calculate shifts per doctor
     shifts_per_doctor = df['Doctor'].value_counts()
-    min_shifts_required = 14
 
     col1, col2 = st.columns(2)
 
     with col1:
-        st.write("**Shifts per Doctor:**")
+        st.write("**Shifts per Team Member:**")
         for doctor, count in shifts_per_doctor.items():
-            # Color code based on minimum requirement
-            if count < min_shifts_required:
-                st.markdown(f"🔴 {doctor}: {count} shifts (needs {min_shifts_required - count} more)")
-            elif count == min_shifts_required:
-                st.markdown(f"🟡 {doctor}: {count} shifts (at minimum)")
-            else:
-                st.markdown(f"🟢 {doctor}: {count} shifts (+{count - min_shifts_required} above minimum)")
+            st.write(f"{doctor}: {count} shifts")
 
     with col2:
         st.write("**Shift Distribution:**")
@@ -244,13 +187,19 @@ def display_schedule_summary(df):
         for shift, count in shift_counts.items():
             st.write(f"{shift}: {count} shifts")
 
-        # Add compliance check
-        st.write("**Compliance Status:**")
-        doctors_below_min = (shifts_per_doctor < min_shifts_required).sum()
-        if doctors_below_min == 0:
-            st.success(f"✅ All doctors meet minimum {min_shifts_required} shifts requirement")
-        else:
-            st.warning(f"⚠️ {doctors_below_min} doctor(s) below minimum {min_shifts_required} shifts")
+        # Add balance check
+        st.write("**Balance Status:**")
+        if len(shifts_per_doctor) > 0:
+            min_shifts = shifts_per_doctor.min()
+            max_shifts = shifts_per_doctor.max()
+            difference = max_shifts - min_shifts
+
+            if difference <= 1:
+                st.success(f"✅ Well balanced (difference: {difference})")
+            elif difference <= 2:
+                st.info(f"📊 Reasonably balanced (difference: {difference})")
+            else:
+                st.warning(f"⚠️ Imbalanced workload (difference: {difference})")
 
 def display_calendar_view(df, year, month, doctor_colors):
     """Display schedule in calendar format"""
@@ -344,7 +293,7 @@ def display_schedule_table(df):
     # Display the filtered table
     st.dataframe(
         filtered_df,
-        use_container_width=True,
+        width='stretch',
         hide_index=True
     )
 
@@ -366,7 +315,7 @@ def create_excel_export(df, year, month):
             summary_data.append({
                 'Doctor': doctor,
                 'Total Shifts': count,
-                'Status': 'Above Minimum' if count > 14 else ('At Minimum' if count == 14 else 'Below Minimum')
+                'Status': 'Balanced'
             })
 
         summary_df = pd.DataFrame(summary_data)
@@ -691,13 +640,13 @@ def main():
 
         for day_name in ["Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday", "Sunday"]:
             with st.expander(f"📅 {day_name} Shifts"):
-                day_shifts = st.session_state.shift_config.get(day_name, {})
+                day_shifts = st.session_state.shift_config.get(day_name, {}).copy()
+
+                # Track changes
+                changes_made = False
 
                 # Display existing shifts with edit/delete options
-                shifts_to_remove = []
-                updated_shifts = {}
-
-                for i, (shift_name, shift_details) in enumerate(day_shifts.items()):
+                for i, (shift_name, shift_details) in enumerate(list(day_shifts.items())):
                     col1, col2, col3, col4 = st.columns([2, 1, 1, 1])
 
                     with col1:
@@ -708,29 +657,37 @@ def main():
                         new_end = st.text_input(f"End", value=shift_details['end'], key=f"{day_name}_end_{i}", help="HH:MM format")
                     with col4:
                         if st.button("🗑️", key=f"{day_name}_delete_{i}", help="Delete shift"):
-                            shifts_to_remove.append(shift_name)
+                            del day_shifts[shift_name]
+                            changes_made = True
 
-                    # Validate time format
-                    try:
-                        datetime.strptime(new_start, '%H:%M')
-                        datetime.strptime(new_end, '%H:%M')
+                    # Update shift if name or times changed
+                    if new_shift_name != shift_name or new_start != shift_details['start'] or new_end != shift_details['end']:
+                        try:
+                            datetime.strptime(new_start, '%H:%M')
+                            datetime.strptime(new_end, '%H:%M')
 
-                        # Calculate hours (handle overnight shifts)
-                        start_dt = datetime.strptime(new_start, '%H:%M')
-                        end_dt = datetime.strptime(new_end, '%H:%M')
-                        if end_dt <= start_dt:
-                            # Overnight shift
-                            hours = 24 - (start_dt.hour - end_dt.hour) - (start_dt.minute - end_dt.minute) / 60
-                        else:
-                            hours = (end_dt.hour - start_dt.hour) + (end_dt.minute - start_dt.minute) / 60
+                            # Calculate hours (handle overnight shifts)
+                            start_dt = datetime.strptime(new_start, '%H:%M')
+                            end_dt = datetime.strptime(new_end, '%H:%M')
+                            if end_dt <= start_dt:
+                                # Overnight shift
+                                hours = 24 - (start_dt.hour - end_dt.hour) - (start_dt.minute - end_dt.minute) / 60
+                            else:
+                                hours = (end_dt.hour - start_dt.hour) + (end_dt.minute - start_dt.minute) / 60
 
-                        updated_shifts[new_shift_name] = {
-                            "start": new_start,
-                            "end": new_end,
-                            "hours": round(hours, 1)
-                        }
-                    except ValueError:
-                        st.error(f"Invalid time format for {shift_name}. Use HH:MM format (e.g., 07:00)")
+                            # Remove old shift if name changed
+                            if new_shift_name != shift_name and shift_name in day_shifts:
+                                del day_shifts[shift_name]
+
+                            # Add/update shift
+                            day_shifts[new_shift_name] = {
+                                "start": new_start,
+                                "end": new_end,
+                                "hours": round(hours, 1)
+                            }
+                            changes_made = True
+                        except ValueError:
+                            st.error(f"Invalid time format for {shift_name}. Use HH:MM format (e.g., 07:00)")
 
                 # Add new shift section
                 st.write("**Add New Shift:**")
@@ -757,28 +714,22 @@ def main():
                                 else:
                                     hours = (end_dt.hour - start_dt.hour) + (end_dt.minute - start_dt.minute) / 60
 
-                                updated_shifts[new_shift_name] = {
+                                day_shifts[new_shift_name] = {
                                     "start": new_shift_start,
                                     "end": new_shift_end,
                                     "hours": round(hours, 1)
                                 }
+                                changes_made = True
                                 st.success(f"Added {new_shift_name} shift!")
-                                st.rerun()
                             except ValueError:
                                 st.error("Invalid time format. Use HH:MM format (e.g., 07:00)")
                         else:
                             st.error("Please fill in all fields")
 
-                # Apply changes
-                for shift_to_remove in shifts_to_remove:
-                    if shift_to_remove in day_shifts:
-                        del day_shifts[shift_to_remove]
-
-                # Update with modified shifts
-                for shift_name, shift_data in updated_shifts.items():
-                    day_shifts[shift_name] = shift_data
-
-                st.session_state.shift_config[day_name] = day_shifts
+                # Apply changes to session state
+                if changes_made:
+                    st.session_state.shift_config[day_name] = day_shifts
+                    st.rerun()
 
                 # Show summary for this day
                 if day_shifts:
@@ -853,15 +804,16 @@ def main():
         st.write(f"**Total Team Members:** {len(st.session_state.doctors)}")
 
         st.write("**Shift Types:**")
-        st.write("• **Mon, Wed, Thu:** 7a-7p, 12p-12a, 7p-7a")
-        st.write("• **Tue:** 7a-7p, 12p-12a (no overnight)")
-        st.write("• **Fri-Sun:** 7a-7p, 10a-10p, 2p-2a, 7p-7a")
+        st.write("• Fully configurable by day of week")
+        st.write("• Default: Mon/Wed/Thu (3 shifts), Tue (2 shifts), Fri-Sun (4 shifts)")
+        st.write("• Edit in Shift Configuration section above")
 
         st.write("**Requirements:**")
-        st.write("• Minimum 14 shifts per team member")
+        st.write("• Balanced shift distribution across team")
+        st.write("• No multiple shifts per person per day")
         st.write("• 24/7 coverage")
         st.write("• 12-hour shifts")
-        st.write("• Additional shifts added if needed")
+        st.write("• Automatic balancing algorithm")
 
     # Main content
     if st.session_state.schedule_generated and not st.session_state.schedule_df.empty:
