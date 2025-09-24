@@ -4,16 +4,15 @@ import random
 from datetime import datetime, timedelta
 from collections import defaultdict
 import calendar
-import plotly.graph_objects as go
-from plotly.subplots import make_subplots
 import numpy as np
-import io
+import json
+import time
 from io import BytesIO
+from openpyxl.styles import Alignment
 
-# Configuration
+# Default configuration
 DEFAULT_DOCTORS = ["Dr. Smith", "Dr. Johnson", "Dr. Williams", "Dr. Brown", "Dr. Valdez"]
 
-# Default shift configurations by day of week
 DEFAULT_SHIFTS = {
     "Monday": {
         "7a-7p": {"start": "07:00", "end": "19:00", "hours": 12},
@@ -54,22 +53,22 @@ DEFAULT_SHIFTS = {
     }
 }
 
-def initialize_session_state():
-    """Initialize session state variables"""
-    if 'schedule_generated' not in st.session_state:
-        st.session_state.schedule_generated = False
-    if 'schedule_df' not in st.session_state:
-        st.session_state.schedule_df = pd.DataFrame()
-    if 'swap_requests' not in st.session_state:
-        st.session_state.swap_requests = []
+def init_session():
+    """Initialize session state"""
     if 'doctors' not in st.session_state:
         st.session_state.doctors = []
     if 'doctor_colors' not in st.session_state:
         st.session_state.doctor_colors = {}
     if 'shift_config' not in st.session_state:
         st.session_state.shift_config = DEFAULT_SHIFTS.copy()
+    if 'constraints' not in st.session_state:
+        st.session_state.constraints = {}
+    if 'schedule_df' not in st.session_state:
+        st.session_state.schedule_df = pd.DataFrame()
+    if 'schedule_generated' not in st.session_state:
+        st.session_state.schedule_generated = False
 
-def generate_random_colors(doctors):
+def generate_colors(doctors):
     """Generate random colors for doctors"""
     colors = [
         "#FF6B6B", "#4ECDC4", "#45B7D1", "#96CEB4", "#FECA57",
@@ -78,829 +77,797 @@ def generate_random_colors(doctors):
         "#FDCB6E", "#6C5CE7", "#74B9FF", "#00B894", "#E17055"
     ]
 
-    # Shuffle colors for randomness
     random.shuffle(colors)
-
     doctor_colors = {}
     for i, doctor in enumerate(doctors):
         doctor_colors[doctor] = colors[i % len(colors)]
 
-    # Special color assignment for Dr. Valdez
-    if doctor_colors.get("Dr. Valdez"):
+    # Special color for Dr. Valdez
+    if "Dr. Valdez" in doctor_colors:
         doctor_colors["Dr. Valdez"] = "#FD79A8"
 
     return doctor_colors
 
 def get_shifts_for_day(date):
-    """Get available shifts for a given date based on configured shifts"""
+    """Get shifts for a specific day"""
     day_name = date.strftime("%A")
     return st.session_state.shift_config.get(day_name, {})
 
-def generate_monthly_schedule(year, month, doctors):
-    """Generate a schedule for the specified month with balanced shift distribution"""
-    # Get number of days in the month
+def get_doctor_constraints(doctor, year, month):
+    """Get constraints for a doctor in a specific month"""
+    month_key = f"{year}-{month:02d}"
+    return st.session_state.constraints.get(month_key, {}).get(doctor, {
+        'fixed_shifts': [],
+        'days_off': [],
+        'preferred_shifts': []
+    })
+
+def is_available(doctor, date_str, shift_name, year, month):
+    """Check if doctor is available"""
+    constraints = get_doctor_constraints(doctor, year, month)
+
+    # Check days off
+    if date_str in constraints.get('days_off', []):
+        return False
+
+    # Check fixed shifts
+    for fixed in constraints.get('fixed_shifts', []):
+        if fixed['date'] == date_str and fixed['shift'] != shift_name:
+            return False
+
+    return True
+
+def get_fixed_shift(doctor, date_str, year, month):
+    """Get fixed shift for doctor on date"""
+    constraints = get_doctor_constraints(doctor, year, month)
+    for fixed in constraints.get('fixed_shifts', []):
+        if fixed['date'] == date_str:
+            return fixed['shift']
+    return None
+
+def generate_schedule(year, month, doctors):
+    """Generate monthly schedule"""
     days_in_month = calendar.monthrange(year, month)[1]
-
-    # Calculate total shifts for the month
-    total_shifts = 0
-    for day in range(1, days_in_month + 1):
-        date = datetime(year, month, day)
-        shifts_for_day = get_shifts_for_day(date)
-        total_shifts += len(shifts_for_day)
-
-    # Initialize shift counters for each doctor
     doctor_shifts = {doctor: 0 for doctor in doctors}
-    # Track which doctors are assigned on which days to prevent double-booking
-    doctor_daily_assignments = defaultdict(set)  # {date: {doctors assigned that day}}
+    daily_assignments = defaultdict(set)
 
-    # Create all shift slots
-    shift_slots = []
+    # Create shift slots
+    shifts = []
     for day in range(1, days_in_month + 1):
         date = datetime(year, month, day)
         date_str = date.strftime("%Y-%m-%d")
-        shifts_for_day = get_shifts_for_day(date)
+        day_shifts = get_shifts_for_day(date)
 
-        for shift_type, shift_details in shifts_for_day.items():
-            shift_slots.append({
+        for shift_name, shift_data in day_shifts.items():
+            shifts.append({
                 'Date': date_str,
                 'Day': date.strftime("%A"),
-                'Shift': shift_type,
-                'Start_Time': shift_details['start'],
-                'End_Time': shift_details['end']
+                'Shift': shift_name,
+                'Start_Time': shift_data['start'],
+                'End_Time': shift_data['end'],
+                'Doctor': None
             })
 
-    # Sort shift slots by date for better assignment distribution
-    shift_slots.sort(key=lambda x: x['Date'])
+    # Sort by date
+    shifts.sort(key=lambda x: x['Date'])
 
-    schedule_data = []
+    # Assign shifts
+    for shift in shifts:
+        date_str = shift['Date']
+        shift_name = shift['Shift']
 
-    # Assign shifts one by one, ensuring balanced distribution and no double shifts per day
-    for shift_slot in shift_slots:
-        shift_date = shift_slot['Date']
+        # Check for fixed assignments first
+        fixed_doctor = None
+        for doctor in doctors:
+            if get_fixed_shift(doctor, date_str, year, month) == shift_name:
+                fixed_doctor = doctor
+                break
 
-        # Get doctors who are NOT already assigned on this day
-        available_doctors = [doc for doc in doctors if doc not in doctor_daily_assignments[shift_date]]
+        if fixed_doctor:
+            assigned_doctor = fixed_doctor
+        else:
+            # Find available doctors
+            available = [d for d in doctors if is_available(d, date_str, shift_name, year, month)]
+            if not available:
+                available = doctors
 
-        # If all doctors are already assigned this day, fall back to all doctors
-        # but prioritize those with fewer total shifts
-        if not available_doctors:
-            available_doctors = doctors
+            # Prefer doctors not working today
+            not_working = [d for d in available if d not in daily_assignments[date_str]]
+            if not_working:
+                available = not_working
 
-        # Among available doctors, find those with the minimum number of shifts
-        min_shifts = min(doctor_shifts[doc] for doc in available_doctors)
-        best_candidates = [doc for doc in available_doctors if doctor_shifts[doc] == min_shifts]
+            # Choose doctor with fewest shifts
+            min_shifts = min(doctor_shifts[d] for d in available)
+            candidates = [d for d in available if doctor_shifts[d] == min_shifts]
+            assigned_doctor = random.choice(candidates)
 
-        # If multiple doctors have the same minimum shifts, prefer those not working today
-        doctors_not_working_today = [doc for doc in best_candidates if doc not in doctor_daily_assignments[shift_date]]
-        if doctors_not_working_today:
-            best_candidates = doctors_not_working_today
-
-        # Randomly select from the best candidates
-        assigned_doctor = random.choice(best_candidates)
-
-        # Assign the shift
+        # Assign shift
+        shift['Doctor'] = assigned_doctor
         doctor_shifts[assigned_doctor] += 1
-        doctor_daily_assignments[shift_date].add(assigned_doctor)
+        daily_assignments[date_str].add(assigned_doctor)
 
-        shift_slot['Doctor'] = assigned_doctor
-        schedule_data.append(shift_slot)
+    return pd.DataFrame(shifts)
 
-    return pd.DataFrame(schedule_data)
+def export_config():
+    """Export configuration as JSON with examples"""
+    # Create example constraints if none exist
+    example_constraints = {}
+    if not st.session_state.constraints and st.session_state.doctors:
+        current_date = datetime.now()
+        month_key = f"{current_date.year}-{current_date.month:02d}"
+        days_in_month = calendar.monthrange(current_date.year, current_date.month)[1]
 
-def display_schedule_summary(df):
-    """Display summary statistics of the schedule"""
-    st.subheader("Schedule Summary")
+        example_constraints[month_key] = {}
 
-    # Calculate shifts per doctor
-    shifts_per_doctor = df['Doctor'].value_counts()
+        # Example for first doctor - has set schedule
+        if len(st.session_state.doctors) > 0:
+            doctor1 = st.session_state.doctors[0]
+            example_constraints[month_key][doctor1] = {
+                "fixed_shifts": [
+                    {"date": f"{current_date.year}-{current_date.month:02d}-01", "shift": "7a-7p"},
+                    {"date": f"{current_date.year}-{current_date.month:02d}-08", "shift": "7a-7p"},
+                    {"date": f"{current_date.year}-{current_date.month:02d}-15", "shift": "7a-7p"},
+                    {"date": f"{current_date.year}-{current_date.month:02d}-22", "shift": "7a-7p"}
+                ],
+                "days_off": [
+                    f"{current_date.year}-{current_date.month:02d}-05",
+                    f"{current_date.year}-{current_date.month:02d}-12"
+                ],
+                "preferred_shifts": ["7a-7p", "12p-12a"],
+                "notes": "Works every Monday, prefers day shifts"
+            }
 
-    col1, col2 = st.columns(2)
+        # Example for second doctor - has days off requests
+        if len(st.session_state.doctors) > 1:
+            doctor2 = st.session_state.doctors[1]
+            example_constraints[month_key][doctor2] = {
+                "fixed_shifts": [],
+                "days_off": [
+                    f"{current_date.year}-{current_date.month:02d}-10",
+                    f"{current_date.year}-{current_date.month:02d}-11",
+                    f"{current_date.year}-{current_date.month:02d}-25"
+                ],
+                "preferred_shifts": ["10a-10p", "2p-2a"],
+                "notes": "Prefers weekend shifts, vacation mid-month"
+            }
 
-    with col1:
-        st.write("**Shifts per Team Member:**")
-        for doctor, count in shifts_per_doctor.items():
-            st.write(f"{doctor}: {count} shifts")
+        # Example for third doctor - night shift specialist
+        if len(st.session_state.doctors) > 2:
+            doctor3 = st.session_state.doctors[2]
+            example_constraints[month_key][doctor3] = {
+                "fixed_shifts": [
+                    {"date": f"{current_date.year}-{current_date.month:02d}-02", "shift": "7p-7a"},
+                    {"date": f"{current_date.year}-{current_date.month:02d}-09", "shift": "7p-7a"},
+                    {"date": f"{current_date.year}-{current_date.month:02d}-16", "shift": "7p-7a"},
+                    {"date": f"{current_date.year}-{current_date.month:02d}-23", "shift": "7p-7a"}
+                ],
+                "days_off": [],
+                "preferred_shifts": ["7p-7a", "2p-2a"],
+                "notes": "Night shift specialist, works every Tuesday night"
+            }
 
-    with col2:
-        st.write("**Shift Distribution:**")
-        shift_counts = df['Shift'].value_counts()
-        for shift, count in shift_counts.items():
-            st.write(f"{shift}: {count} shifts")
+    config = {
+        'team_members': st.session_state.doctors,
+        'shift_configuration': st.session_state.shift_config,
+        'constraints': st.session_state.constraints or example_constraints,
+        'export_date': datetime.now().isoformat(),
+        'examples': {
+            'description': 'This configuration includes example constraints',
+            'constraint_types': {
+                'fixed_shifts': 'Specific shift assignments that must be honored',
+                'days_off': 'Dates when the team member is unavailable',
+                'preferred_shifts': 'Shift types the team member prefers to work',
+                'notes': 'Additional information about the team member'
+            }
+        }
+    }
+    return json.dumps(config, indent=2)
 
-        # Add balance check
-        st.write("**Balance Status:**")
-        if len(shifts_per_doctor) > 0:
-            min_shifts = shifts_per_doctor.min()
-            max_shifts = shifts_per_doctor.max()
-            difference = max_shifts - min_shifts
+def json_to_yaml(json_str):
+    """Convert JSON to YAML-style format"""
+    try:
+        data = json.loads(json_str)
+        return dict_to_yaml(data, 0)
+    except:
+        return json_str
 
-            if difference <= 1:
-                st.success(f"✅ Well balanced (difference: {difference})")
-            elif difference <= 2:
-                st.info(f"📊 Reasonably balanced (difference: {difference})")
+def dict_to_yaml(obj, indent=0):
+    """Convert dictionary to YAML format"""
+    yaml_str = ""
+    indent_str = "  " * indent
+
+    if isinstance(obj, dict):
+        for key, value in obj.items():
+            if isinstance(value, (dict, list)):
+                yaml_str += f"{indent_str}{key}:\n"
+                yaml_str += dict_to_yaml(value, indent + 1)
             else:
-                st.warning(f"⚠️ Imbalanced workload (difference: {difference})")
-
-def display_calendar_view(df, year, month, doctor_colors):
-    """Display schedule in calendar format"""
-    st.subheader("Calendar View")
-
-    # Create calendar grid
-    cal = calendar.monthcalendar(year, month)
-    month_name = calendar.month_name[month]
-
-    st.write(f"### {month_name} {year}")
-
-    # Create a table-like visualization for the calendar
-    calendar_html = f"<div style='font-family: Arial, sans-serif;'>"
-    calendar_html += "<table style='width: 100%; border-collapse: collapse; margin: 20px 0;'>"
-
-    # Header row
-    days = ['Monday', 'Tuesday', 'Wednesday', 'Thursday', 'Friday', 'Saturday', 'Sunday']
-    calendar_html += "<tr>"
-    for day_name in days:
-        calendar_html += f"<th style='border: 1px solid #ddd; padding: 8px; background-color: #f2f2f2; color: black; text-align: center;'>{day_name[:3]}</th>"
-    calendar_html += "</tr>"
-
-    # Calendar rows
-    for week in cal:
-        calendar_html += "<tr style='height: 120px;'>"
-        for day in week:
-            if day == 0:
-                calendar_html += "<td style='border: 1px solid #ddd; padding: 4px; background-color: #f9f9f9;'></td>"
+                yaml_str += f"{indent_str}{key}: {json.dumps(value) if isinstance(value, str) else value}\n"
+    elif isinstance(obj, list):
+        for item in obj:
+            if isinstance(item, (dict, list)):
+                yaml_str += f"{indent_str}-\n"
+                yaml_str += dict_to_yaml(item, indent + 1)
             else:
-                day_date = datetime(year, month, day).strftime("%Y-%m-%d")
-                day_shifts = df[df['Date'] == day_date]
+                yaml_str += f"{indent_str}- {json.dumps(item) if isinstance(item, str) else item}\n"
 
-                cell_content = f"<div style='font-weight: bold; margin-bottom: 5px;'>{day}</div>"
+    return yaml_str
 
-                for _, shift in day_shifts.iterrows():
-                    color = doctor_colors.get(shift['Doctor'], '#CCCCCC')
-                    cell_content += f"<div style='background-color: {color}; color: white; padding: 2px; margin: 1px; border-radius: 3px; font-size: 10px; text-align: center;'>"
-                    cell_content += f"<b>{shift['Shift']}</b><br>{shift['Doctor'].replace('Dr. ', '')}"
-                    cell_content += "</div>"
+def yaml_to_json(yaml_str):
+    """Convert YAML-style format to JSON"""
+    try:
+        # Simple YAML to JSON conversion for basic structures
+        # This is a simplified parser - for production use a proper YAML library
+        lines = yaml_str.strip().split('\n')
+        result = {}
+        current_dict = result
+        dict_stack = [result]
+        key_stack = []
 
-                calendar_html += f"<td style='border: 1px solid #ddd; padding: 4px; vertical-align: top;'>{cell_content}</td>"
-        calendar_html += "</tr>"
+        for line in lines:
+            if line.strip().startswith('#') or not line.strip():
+                continue
 
-    calendar_html += "</table></div>"
+            indent_level = (len(line) - len(line.lstrip())) // 2
+            content = line.strip()
 
-    # Display the calendar
-    st.markdown(calendar_html, unsafe_allow_html=True)
+            if ':' in content and not content.startswith('-'):
+                key, value = content.split(':', 1)
+                key = key.strip().strip('"')
+                value = value.strip()
 
-    # Legend
-    st.write("**Doctor Color Legend:**")
-    legend_cols = st.columns(len(doctor_colors))
-    for i, (doctor, color) in enumerate(doctor_colors.items()):
-        with legend_cols[i]:
-            st.markdown(f'<div style="background-color: {color}; color: white; padding: 5px; text-align: center; border-radius: 5px; margin: 2px;">{doctor}</div>', unsafe_allow_html=True)
+                # Adjust stack based on indent level
+                while len(dict_stack) > indent_level + 1:
+                    dict_stack.pop()
+                    key_stack.pop()
 
-def display_schedule_table(df):
-    """Display the schedule in a table format"""
-    st.subheader("Table View")
+                current_dict = dict_stack[-1]
 
-    # Add filters
-    col1, col2, col3 = st.columns(3)
+                if value:
+                    # Simple value
+                    try:
+                        if value.startswith('"') and value.endswith('"'):
+                            current_dict[key] = value[1:-1]
+                        elif value.lower() in ['true', 'false']:
+                            current_dict[key] = value.lower() == 'true'
+                        elif value.isdigit():
+                            current_dict[key] = int(value)
+                        else:
+                            current_dict[key] = value
+                    except:
+                        current_dict[key] = value
+                else:
+                    # Nested object
+                    current_dict[key] = {}
+                    dict_stack.append(current_dict[key])
+                    key_stack.append(key)
 
-    with col1:
-        selected_doctors = st.multiselect(
-            "Filter by Doctor:",
-            options=st.session_state.doctors if st.session_state.doctors else [],
-            default=st.session_state.doctors if st.session_state.doctors else []
-        )
+        return json.dumps(result, indent=2)
+    except Exception as e:
+        return f"Error parsing YAML: {str(e)}"
 
-    with col2:
-        selected_shifts = st.multiselect(
-            "Filter by Shift:",
-            options=df['Shift'].unique(),
-            default=df['Shift'].unique()
-        )
+def import_config(content):
+    """Import configuration from JSON or YAML"""
+    try:
+        # Try JSON first
+        if content.strip().startswith('{'):
+            config = json.loads(content)
+        else:
+            # Convert YAML to JSON first
+            json_content = yaml_to_json(content)
+            config = json.loads(json_content)
 
-    with col3:
-        selected_days = st.multiselect(
-            "Filter by Day:",
-            options=df['Day'].unique(),
-            default=df['Day'].unique()
-        )
+        if 'team_members' in config:
+            st.session_state.doctors = config['team_members']
+            st.session_state.doctor_colors = generate_colors(st.session_state.doctors)
 
-    # Filter the dataframe
-    filtered_df = df[
-        (df['Doctor'].isin(selected_doctors)) &
-        (df['Shift'].isin(selected_shifts)) &
-        (df['Day'].isin(selected_days))
-    ]
+        if 'shift_configuration' in config:
+            st.session_state.shift_config = config['shift_configuration']
 
-    # Display the filtered table
-    st.dataframe(
-        filtered_df,
-        width='stretch',
-        hide_index=True
-    )
+        if 'constraints' in config:
+            st.session_state.constraints = config['constraints']
 
-    return filtered_df
+        return True, "Configuration imported successfully!"
+    except Exception as e:
+        return False, f"Error: {str(e)}"
 
 def create_excel_export(df, year, month):
-    """Create an Excel file with the schedule data"""
-    # Create a BytesIO buffer
+    """Create Excel export"""
     buffer = BytesIO()
 
     with pd.ExcelWriter(buffer, engine='openpyxl') as writer:
-        # Main schedule sheet
+        # Schedule sheet
         df.to_excel(writer, sheet_name='Schedule', index=False)
 
         # Summary sheet
         summary_data = []
         shifts_per_doctor = df['Doctor'].value_counts()
         for doctor, count in shifts_per_doctor.items():
-            summary_data.append({
-                'Doctor': doctor,
-                'Total Shifts': count,
-                'Status': 'Balanced'
-            })
+            summary_data.append({'Doctor': doctor, 'Total_Shifts': count})
+        pd.DataFrame(summary_data).to_excel(writer, sheet_name='Summary', index=False)
 
-        summary_df = pd.DataFrame(summary_data)
-        summary_df.to_excel(writer, sheet_name='Summary', index=False)
-
-        # Daily view sheet
-        daily_pivot = df.pivot_table(
-            index='Date',
-            columns='Shift',
-            values='Doctor',
-            aggfunc='first',
-            fill_value=''
-        )
-        daily_pivot.to_excel(writer, sheet_name='Daily View')
-
-        # Calendar view sheet
+        # Calendar sheet
         cal = calendar.monthcalendar(year, month)
-        month_name = calendar.month_name[month]
+        calendar_data = [['Week'] + ['Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat', 'Sun']]
 
-        # Create calendar data structure
-        calendar_data = []
-        day_names = ['Monday', 'Tuesday', 'Wednesday', 'Thursday', 'Friday', 'Saturday', 'Sunday']
-
-        # Add header row
-        calendar_data.append([''] + day_names)
-
-        # Process each week
         for week_num, week in enumerate(cal):
-            week_data = [f'Week {week_num + 1}']
-
+            week_row = [f'Week {week_num + 1}']
             for day in week:
                 if day == 0:
-                    week_data.append('')
+                    week_row.append('')
                 else:
-                    # Get shifts for this day
-                    day_date = datetime(year, month, day).strftime("%Y-%m-%d")
-                    day_shifts = df[df['Date'] == day_date]
-
-                    # Create cell content with day number and shifts
+                    date_str = f"{year}-{month:02d}-{day:02d}"
+                    day_shifts = df[df['Date'] == date_str]
                     cell_content = f"{day}\n"
+                    for _, shift in day_shifts.iterrows():
+                        cell_content += f"{shift['Shift']}: {shift['Doctor']}\n"
+                    week_row.append(cell_content.strip())
+            calendar_data.append(week_row)
 
-                    if not day_shifts.empty:
-                        for _, shift in day_shifts.iterrows():
-                            cell_content += f"{shift['Shift']}: {shift['Doctor']}\n"
+        cal_df = pd.DataFrame(calendar_data[1:], columns=calendar_data[0])
+        cal_df.to_excel(writer, sheet_name='Calendar', index=False)
 
-                    week_data.append(cell_content.strip())
-
-            calendar_data.append(week_data)
-
-        # Create DataFrame and export
-        calendar_df = pd.DataFrame(calendar_data[1:], columns=calendar_data[0])
-        calendar_df.to_excel(writer, sheet_name='Calendar View', index=False)
-
-        # Format the calendar sheet
+        # Format calendar sheet
         workbook = writer.book
-        calendar_sheet = writer.sheets['Calendar View']
-
-        # Set column widths
-        for col in range(1, 8):  # Columns B through H (days of week)
-            calendar_sheet.column_dimensions[chr(65 + col)].width = 20
-
-        # Set row heights and enable text wrapping
+        cal_sheet = writer.sheets['Calendar']
+        for col in range(1, 8):
+            cal_sheet.column_dimensions[chr(65 + col)].width = 20
         for row in range(2, len(calendar_data) + 1):
-            calendar_sheet.row_dimensions[row].height = 80
+            cal_sheet.row_dimensions[row].height = 80
             for col in range(1, 8):
-                cell = calendar_sheet.cell(row=row, column=col + 1)
-                from openpyxl.styles import Alignment
+                cell = cal_sheet.cell(row=row, column=col + 1)
                 cell.alignment = Alignment(wrap_text=True, vertical='top')
 
     buffer.seek(0)
     return buffer
 
-def create_ics_export(df, year, month):
-    """Create an ICS calendar file with the schedule data"""
-    ics_content = []
-    ics_content.append("BEGIN:VCALENDAR")
-    ics_content.append("VERSION:2.0")
-    ics_content.append("PRODID:-//Tool Sched//EN")
-    ics_content.append("CALSCALE:GREGORIAN")
-    ics_content.append("METHOD:PUBLISH")
+def create_ics_export(df):
+    """Create ICS calendar export"""
+    lines = [
+        "BEGIN:VCALENDAR",
+        "VERSION:2.0",
+        "PRODID:-//Tool Sched//EN"
+    ]
 
     for _, row in df.iterrows():
-        # Parse the date and times
-        event_date = datetime.strptime(row['Date'], '%Y-%m-%d')
+        date = datetime.strptime(row['Date'], '%Y-%m-%d')
+        start_time = row['Start_Time']
+        end_time = row['End_Time']
 
-        # Parse start time
-        start_time_str = row['Start_Time']
-        start_hour, start_minute = map(int, start_time_str.split(':'))
-        start_dt = event_date.replace(hour=start_hour, minute=start_minute)
+        start_hour, start_min = map(int, start_time.split(':'))
+        end_hour, end_min = map(int, end_time.split(':'))
 
-        # Parse end time (handle overnight shifts)
-        end_time_str = row['End_Time']
-        end_hour, end_minute = map(int, end_time_str.split(':'))
-        end_dt = event_date.replace(hour=end_hour, minute=end_minute)
+        start_dt = date.replace(hour=start_hour, minute=start_min)
+        end_dt = date.replace(hour=end_hour, minute=end_min)
 
-        # If end time is earlier than start time, it's next day
         if end_dt <= start_dt:
             end_dt += timedelta(days=1)
 
-        # Format for ICS (UTC format)
-        start_utc = start_dt.strftime('%Y%m%dT%H%M%S')
-        end_utc = end_dt.strftime('%Y%m%dT%H%M%S')
+        lines.extend([
+            "BEGIN:VEVENT",
+            f"UID:{row['Date']}-{row['Shift']}-{row['Doctor'].replace(' ', '')}",
+            f"DTSTART:{start_dt.strftime('%Y%m%dT%H%M%S')}",
+            f"DTEND:{end_dt.strftime('%Y%m%dT%H%M%S')}",
+            f"SUMMARY:{row['Doctor']} - {row['Shift']}",
+            f"DESCRIPTION:Shift assignment for {row['Doctor']}",
+            "LOCATION:Workplace",
+            "END:VEVENT"
+        ])
 
-        # Create unique ID for the event
-        uid = f"{row['Date']}-{row['Shift']}-{row['Doctor'].replace(' ', '')}-{hash(row['Doctor'] + row['Date'] + row['Shift'])}"
-
-        # Add event
-        ics_content.append("BEGIN:VEVENT")
-        ics_content.append(f"UID:{uid}")
-        ics_content.append(f"DTSTART:{start_utc}")
-        ics_content.append(f"DTEND:{end_utc}")
-        ics_content.append(f"SUMMARY:{row['Doctor']} - {row['Shift']} Shift")
-        ics_content.append(f"DESCRIPTION:Shift assignment for {row['Doctor']} on {row['Day']}")
-        ics_content.append(f"LOCATION:Workplace")
-        ics_content.append("END:VEVENT")
-
-    ics_content.append("END:VCALENDAR")
-
-    return '\n'.join(ics_content)
-
-def handle_shift_swaps():
-    """Handle shift swap requests between doctors"""
-    st.subheader("Shift Exchange System")
-
-    if st.session_state.schedule_df.empty:
-        st.warning("Please generate a schedule first.")
-        return
-
-    with st.form("swap_form"):
-        st.write("**Request Shift Exchange**")
-
-        col1, col2 = st.columns(2)
-
-        with col1:
-            # Doctor requesting swap
-            requesting_doctor = st.selectbox(
-                "Your Name:",
-                options=st.session_state.doctors if st.session_state.doctors else []
-            )
-
-            # Get shifts for requesting doctor
-            doctor_shifts = st.session_state.schedule_df[
-                st.session_state.schedule_df['Doctor'] == requesting_doctor
-            ].copy()
-
-            if not doctor_shifts.empty:
-                doctor_shifts['Display'] = (
-                    doctor_shifts['Date'] + " - " +
-                    doctor_shifts['Shift'] + " (" +
-                    doctor_shifts['Start_Time'] + " - " +
-                    doctor_shifts['End_Time'] + ")"
-                )
-
-                shift_to_give = st.selectbox(
-                    "Shift you want to give away:",
-                    options=doctor_shifts['Display'].tolist(),
-                    key="give_shift"
-                )
-            else:
-                st.write("No shifts assigned to selected doctor")
-                shift_to_give = None
-
-        with col2:
-            # Target doctor for swap
-            target_doctor = st.selectbox(
-                "Doctor to swap with:",
-                options=[d for d in st.session_state.doctors if d != requesting_doctor] if st.session_state.doctors else []
-            )
-
-            # Get shifts for target doctor
-            target_shifts = st.session_state.schedule_df[
-                st.session_state.schedule_df['Doctor'] == target_doctor
-            ].copy()
-
-            if not target_shifts.empty:
-                target_shifts['Display'] = (
-                    target_shifts['Date'] + " - " +
-                    target_shifts['Shift'] + " (" +
-                    target_shifts['Start_Time'] + " - " +
-                    target_shifts['End_Time'] + ")"
-                )
-
-                shift_to_get = st.selectbox(
-                    "Shift you want to take:",
-                    options=target_shifts['Display'].tolist(),
-                    key="get_shift"
-                )
-            else:
-                st.write("No shifts assigned to target doctor")
-                shift_to_get = None
-
-        submit_swap = st.form_submit_button("Request Swap")
-
-        if submit_swap and shift_to_give and shift_to_get:
-            # Process the swap
-            swap_request = {
-                'requesting_doctor': requesting_doctor,
-                'target_doctor': target_doctor,
-                'give_shift': shift_to_give,
-                'get_shift': shift_to_get,
-                'status': 'pending'
-            }
-
-            st.session_state.swap_requests.append(swap_request)
-            st.success("Swap request submitted!")
-
-    # Display pending swap requests
-    if st.session_state.swap_requests:
-        st.write("**Pending Swap Requests:**")
-
-        for i, swap in enumerate(st.session_state.swap_requests):
-            if swap['status'] == 'pending':
-                with st.expander(f"Swap Request #{i+1}"):
-                    st.write(f"**From:** {swap['requesting_doctor']}")
-                    st.write(f"**To:** {swap['target_doctor']}")
-                    st.write(f"**Giving:** {swap['give_shift']}")
-                    st.write(f"**Wanting:** {swap['get_shift']}")
-
-                    col1, col2 = st.columns(2)
-                    with col1:
-                        if st.button(f"Approve Swap #{i+1}", key=f"approve_{i}"):
-                            execute_swap(i)
-                            st.rerun()
-
-                    with col2:
-                        if st.button(f"Reject Swap #{i+1}", key=f"reject_{i}"):
-                            st.session_state.swap_requests[i]['status'] = 'rejected'
-                            st.rerun()
-
-def execute_swap(swap_index):
-    """Execute an approved shift swap"""
-    swap = st.session_state.swap_requests[swap_index]
-
-    # Parse shift information from display strings
-    give_date = swap['give_shift'].split(' - ')[0]
-    give_shift_type = swap['give_shift'].split(' - ')[1].split(' (')[0]
-
-    get_date = swap['get_shift'].split(' - ')[0]
-    get_shift_type = swap['get_shift'].split(' - ')[1].split(' (')[0]
-
-    # Update the schedule dataframe
-    df = st.session_state.schedule_df
-
-    # Find and swap the assignments
-    give_mask = (df['Date'] == give_date) & (df['Shift'] == give_shift_type)
-    get_mask = (df['Date'] == get_date) & (df['Shift'] == get_shift_type)
-
-    df.loc[give_mask, 'Doctor'] = swap['target_doctor']
-    df.loc[get_mask, 'Doctor'] = swap['requesting_doctor']
-
-    # Mark swap as completed
-    st.session_state.swap_requests[swap_index]['status'] = 'completed'
-
-    st.success("Swap completed successfully!")
+    lines.append("END:VCALENDAR")
+    return '\n'.join(lines)
 
 def main():
-    st.set_page_config(
-        page_title="Tool Sched",
-        page_icon="🛠️",
-        layout="wide"
-    )
-
+    st.set_page_config(page_title="Tool Sched", page_icon="🛠️", layout="wide")
     st.title("🛠️ Tool Sched")
     st.write("Collaborative scheduling system for any team")
 
-    initialize_session_state()
+    init_session()
 
-    # Sidebar for schedule generation
+    # Sidebar
     with st.sidebar:
-        st.header("Team Configuration")
+        st.header("Team Members")
 
-        # Doctor input section
-        st.subheader("Add Team Members")
-
-        # Option to use defaults or start fresh
-        if st.button("Load Default Team"):
+        # Load defaults
+        if st.button("Load Default Team", key="load_defaults"):
             st.session_state.doctors = DEFAULT_DOCTORS.copy()
-            st.session_state.doctor_colors = generate_random_colors(st.session_state.doctors)
+            st.session_state.doctor_colors = generate_colors(st.session_state.doctors)
+            st.success("Default team loaded!")
             st.rerun()
 
-        # Manual doctor entry
-        new_doctor = st.text_input("Add Team Member Name:", placeholder="e.g., Dr. Johnson")
-        if st.button("Add Team Member") and new_doctor.strip():
-            if new_doctor.strip() not in st.session_state.doctors:
-                st.session_state.doctors.append(new_doctor.strip())
-                st.session_state.doctor_colors = generate_random_colors(st.session_state.doctors)
-                st.success(f"Added {new_doctor.strip()}")
+        # Add member
+        new_member = st.text_input("Add team member:", placeholder="e.g., Dr. Johnson", key="new_member")
+        if st.button("Add Member", key="add_member") and new_member.strip():
+            if new_member.strip() not in st.session_state.doctors:
+                st.session_state.doctors.append(new_member.strip())
+                st.session_state.doctor_colors = generate_colors(st.session_state.doctors)
+                st.success(f"Added {new_member.strip()}")
                 st.rerun()
             else:
-                st.warning("Team member already exists!")
+                st.warning("Already exists!")
 
-        # Display current doctors with remove option
+        # Display members
         if st.session_state.doctors:
-            st.subheader("Current Team Members")
+            st.write("**Current Team:**")
             for i, doctor in enumerate(st.session_state.doctors):
                 col1, col2 = st.columns([3, 1])
                 with col1:
-                    color = st.session_state.doctor_colors.get(doctor, "#CCCCCC")
+                    color = st.session_state.doctor_colors.get(doctor, "#CCCCCC") if st.session_state.doctor_colors else "#CCCCCC"
                     st.markdown(f'<div style="background-color: {color}; color: white; padding: 3px; border-radius: 3px; text-align: center; margin: 2px;">{doctor}</div>', unsafe_allow_html=True)
                 with col2:
                     if st.button("❌", key=f"remove_{i}"):
                         st.session_state.doctors.remove(doctor)
-                        st.session_state.doctor_colors = generate_random_colors(st.session_state.doctors)
+                        if st.session_state.doctors:
+                            st.session_state.doctor_colors = generate_colors(st.session_state.doctors)
                         st.rerun()
 
-            if st.button("🎨 Regenerate Colors"):
-                st.session_state.doctor_colors = generate_random_colors(st.session_state.doctors)
+            if st.button("🎨 New Colors", key="regen_colors"):
+                st.session_state.doctor_colors = generate_colors(st.session_state.doctors)
                 st.rerun()
 
         st.divider()
 
-        # Shift Configuration Section
-        st.header("Shift Configuration")
+        # Import/Export
+        st.header("Configuration")
 
-        if st.button("Reset to Default Shifts"):
-            st.session_state.shift_config = DEFAULT_SHIFTS.copy()
-            st.success("Shifts reset to defaults!")
-            st.rerun()
+        # Export
+        if st.session_state.doctors or st.session_state.constraints:
+            config_json = export_config()
+            st.download_button(
+                "📥 Export Config (JSON)",
+                config_json,
+                f"tool_sched_config_{datetime.now().strftime('%Y%m%d')}.json",
+                "application/json",
+                key="export_config"
+            )
 
-        # Configurable shift editor
-        st.subheader("Edit Shifts by Day")
+            config_yaml = json_to_yaml(config_json)
+            st.download_button(
+                "📥 Export Config (YAML)",
+                config_yaml,
+                f"tool_sched_config_{datetime.now().strftime('%Y%m%d')}.yaml",
+                "text/yaml",
+                key="export_yaml"
+            )
 
-        for day_name in ["Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday", "Sunday"]:
-            with st.expander(f"📅 {day_name} Shifts"):
-                day_shifts = st.session_state.shift_config.get(day_name, {}).copy()
-
-                # Track changes
-                changes_made = False
-
-                # Display existing shifts with edit/delete options
-                for i, (shift_name, shift_details) in enumerate(list(day_shifts.items())):
-                    col1, col2, col3, col4 = st.columns([2, 1, 1, 1])
-
-                    with col1:
-                        new_shift_name = st.text_input(f"Shift Name", value=shift_name, key=f"{day_name}_name_{i}")
-                    with col2:
-                        new_start = st.text_input(f"Start", value=shift_details['start'], key=f"{day_name}_start_{i}", help="HH:MM format")
-                    with col3:
-                        new_end = st.text_input(f"End", value=shift_details['end'], key=f"{day_name}_end_{i}", help="HH:MM format")
-                    with col4:
-                        if st.button("🗑️", key=f"{day_name}_delete_{i}", help="Delete shift"):
-                            del day_shifts[shift_name]
-                            changes_made = True
-
-                    # Update shift if name or times changed
-                    if new_shift_name != shift_name or new_start != shift_details['start'] or new_end != shift_details['end']:
-                        try:
-                            datetime.strptime(new_start, '%H:%M')
-                            datetime.strptime(new_end, '%H:%M')
-
-                            # Calculate hours (handle overnight shifts)
-                            start_dt = datetime.strptime(new_start, '%H:%M')
-                            end_dt = datetime.strptime(new_end, '%H:%M')
-                            if end_dt <= start_dt:
-                                # Overnight shift
-                                hours = 24 - (start_dt.hour - end_dt.hour) - (start_dt.minute - end_dt.minute) / 60
-                            else:
-                                hours = (end_dt.hour - start_dt.hour) + (end_dt.minute - start_dt.minute) / 60
-
-                            # Remove old shift if name changed
-                            if new_shift_name != shift_name and shift_name in day_shifts:
-                                del day_shifts[shift_name]
-
-                            # Add/update shift
-                            day_shifts[new_shift_name] = {
-                                "start": new_start,
-                                "end": new_end,
-                                "hours": round(hours, 1)
-                            }
-                            changes_made = True
-                        except ValueError:
-                            st.error(f"Invalid time format for {shift_name}. Use HH:MM format (e.g., 07:00)")
-
-                # Add new shift section
-                st.write("**Add New Shift:**")
-                col1, col2, col3, col4 = st.columns([2, 1, 1, 1])
-
-                with col1:
-                    new_shift_name = st.text_input("New Shift Name", key=f"{day_name}_new_name", placeholder="e.g., 6a-6p")
-                with col2:
-                    new_shift_start = st.text_input("Start Time", key=f"{day_name}_new_start", placeholder="06:00")
-                with col3:
-                    new_shift_end = st.text_input("End Time", key=f"{day_name}_new_end", placeholder="18:00")
-                with col4:
-                    if st.button("➕ Add", key=f"{day_name}_add"):
-                        if new_shift_name and new_shift_start and new_shift_end:
-                            try:
-                                datetime.strptime(new_shift_start, '%H:%M')
-                                datetime.strptime(new_shift_end, '%H:%M')
-
-                                # Calculate hours
-                                start_dt = datetime.strptime(new_shift_start, '%H:%M')
-                                end_dt = datetime.strptime(new_shift_end, '%H:%M')
-                                if end_dt <= start_dt:
-                                    hours = 24 - (start_dt.hour - end_dt.hour) - (start_dt.minute - end_dt.minute) / 60
-                                else:
-                                    hours = (end_dt.hour - start_dt.hour) + (end_dt.minute - start_dt.minute) / 60
-
-                                day_shifts[new_shift_name] = {
-                                    "start": new_shift_start,
-                                    "end": new_shift_end,
-                                    "hours": round(hours, 1)
-                                }
-                                changes_made = True
-                                st.success(f"Added {new_shift_name} shift!")
-                            except ValueError:
-                                st.error("Invalid time format. Use HH:MM format (e.g., 07:00)")
-                        else:
-                            st.error("Please fill in all fields")
-
-                # Apply changes to session state
-                if changes_made:
-                    st.session_state.shift_config[day_name] = day_shifts
-                    st.rerun()
-
-                # Show summary for this day
-                if day_shifts:
-                    st.write("**Current shifts:**")
-                    for shift_name, shift_details in day_shifts.items():
-                        st.write(f"• {shift_name}: {shift_details['start']} - {shift_details['end']} ({shift_details['hours']}h)")
-                else:
-                    st.write("No shifts configured for this day")
-
-        # Validation summary
-        st.subheader("📊 Configuration Summary")
-        total_shifts_week = 0
-        for day_name, day_shifts in st.session_state.shift_config.items():
-            shift_count = len(day_shifts)
-            total_shifts_week += shift_count
-            if shift_count == 0:
-                st.warning(f"⚠️ {day_name}: No shifts configured")
+        # Import
+        uploaded = st.file_uploader("📤 Import Config", type=['json', 'yaml', 'yml'], key="import_config")
+        if uploaded:
+            content = uploaded.read().decode('utf-8')
+            success, msg = import_config(content)
+            if success:
+                st.success(msg)
+                st.rerun()
             else:
-                st.info(f"✅ {day_name}: {shift_count} shifts")
-
-        st.write(f"**Total shifts per week:** {total_shifts_week}")
-
-        if total_shifts_week == 0:
-            st.error("❌ No shifts configured. Please add shifts before generating schedule.")
+                st.error(msg)
 
         st.divider()
-        st.header("Schedule Generation")
 
-        # Check if we have enough doctors and shifts
-        total_shifts_configured = sum(len(day_shifts) for day_shifts in st.session_state.shift_config.values())
+        # Schedule generation
+        st.header("Generate Schedule")
 
-        if len(st.session_state.doctors) < 2:
-            st.warning("⚠️ Add at least 2 team members before generating schedule")
-            schedule_generation_disabled = True
-        elif total_shifts_configured == 0:
-            st.warning("⚠️ Configure at least one shift before generating schedule")
-            schedule_generation_disabled = True
-        else:
-            schedule_generation_disabled = False
-
-        # Month and year selection
         current_date = datetime.now()
+        sched_month = st.selectbox("Month:", range(1, 13), index=current_date.month-1, format_func=lambda x: calendar.month_name[x], key="sched_month")
+        sched_year = st.number_input("Year:", min_value=2024, max_value=2030, value=current_date.year, key="sched_year")
 
-        col1, col2 = st.columns(2)
-        with col1:
-            selected_month = st.selectbox(
-                "Month:",
-                options=range(1, 13),
-                index=current_date.month - 1,
-                format_func=lambda x: calendar.month_name[x]
-            )
+        can_generate = len(st.session_state.doctors) >= 2
 
-        with col2:
-            selected_year = st.number_input(
-                "Year:",
-                min_value=2024,
-                max_value=2030,
-                value=current_date.year
-            )
+        if not can_generate:
+            st.warning("Need at least 2 team members")
 
-        if st.button("Generate Schedule", type="primary", disabled=schedule_generation_disabled):
-            st.session_state.schedule_df = generate_monthly_schedule(
-                selected_year, selected_month, st.session_state.doctors
-            )
+        if st.button("🗓️ Generate", disabled=not can_generate, key="generate"):
+            st.session_state.schedule_df = generate_schedule(sched_year, sched_month, st.session_state.doctors)
             st.session_state.schedule_generated = True
-            st.session_state.swap_requests = []  # Reset swap requests
             st.success("Schedule generated!")
             st.rerun()
 
-        # Display configuration
-        st.header("Configuration")
-        st.write(f"**Total Team Members:** {len(st.session_state.doctors)}")
-
-        st.write("**Shift Types:**")
-        st.write("• Fully configurable by day of week")
-        st.write("• Default: Mon/Wed/Thu (3 shifts), Tue (2 shifts), Fri-Sun (4 shifts)")
-        st.write("• Edit in Shift Configuration section above")
-
-        st.write("**Requirements:**")
-        st.write("• Balanced shift distribution across team")
-        st.write("• No multiple shifts per person per day")
-        st.write("• 24/7 coverage")
-        st.write("• 12-hour shifts")
-        st.write("• Automatic balancing algorithm")
-
     # Main content
     if st.session_state.schedule_generated and not st.session_state.schedule_df.empty:
-        # Create tabs
-        tab1, tab2, tab3, tab4 = st.tabs(["📅 Calendar View", "📋 Table View", "🔄 Shift Exchanges", "📊 Analytics"])
+        tab1, tab2, tab3, tab4 = st.tabs(["📅 Calendar", "📋 Table", "⚙️ Edit Constraints", "📊 Analytics"])
 
         with tab1:
-            display_schedule_summary(st.session_state.schedule_df)
-            st.divider()
-            display_calendar_view(st.session_state.schedule_df, selected_year, selected_month, st.session_state.doctor_colors)
+            # Calendar view
+            st.subheader("Calendar View")
+            year = st.session_state.schedule_df.iloc[0]['Date'][:4]
+            month = int(st.session_state.schedule_df.iloc[0]['Date'][5:7])
+
+            cal = calendar.monthcalendar(int(year), month)
+            month_name = calendar.month_name[month]
+
+            st.write(f"### {month_name} {year}")
+
+            # HTML calendar
+            html = "<table style='width: 100%; border-collapse: collapse;'>"
+            html += "<tr>" + "".join(f"<th style='border: 1px solid #ddd; padding: 8px; background: #f2f2f2; color: black;'>{day[:3]}</th>" for day in ['Monday', 'Tuesday', 'Wednesday', 'Thursday', 'Friday', 'Saturday', 'Sunday']) + "</tr>"
+
+            for week in cal:
+                html += "<tr style='height: 120px;'>"
+                for day in week:
+                    if day == 0:
+                        html += "<td style='border: 1px solid #ddd; background: #f9f9f9;'></td>"
+                    else:
+                        date_str = f"{year}-{month:02d}-{day:02d}"
+                        day_shifts = st.session_state.schedule_df[st.session_state.schedule_df['Date'] == date_str]
+
+                        cell = f"<div style='font-weight: bold; margin-bottom: 5px;'>{day}</div>"
+                        for _, shift in day_shifts.iterrows():
+                            color = st.session_state.doctor_colors.get(shift['Doctor'], '#CCCCCC') if st.session_state.doctor_colors else '#CCCCCC'
+                            cell += f"<div style='background: {color}; color: white; padding: 2px; margin: 1px; border-radius: 3px; font-size: 10px; text-align: center;'>"
+                            cell += f"<b>{shift['Shift']}</b><br>{shift['Doctor'].replace('Dr. ', '')}</div>"
+
+                        html += f"<td style='border: 1px solid #ddd; padding: 4px; vertical-align: top;'>{cell}</td>"
+                html += "</tr>"
+
+            html += "</table>"
+            st.markdown(html, unsafe_allow_html=True)
+
+            # Legend
+            if st.session_state.doctor_colors:
+                st.write("**Legend:**")
+                cols = st.columns(len(st.session_state.doctors))
+                for i, (doctor, color) in enumerate(st.session_state.doctor_colors.items()):
+                    with cols[i]:
+                        st.markdown(f'<div style="background: {color}; color: white; padding: 5px; text-align: center; border-radius: 5px;">{doctor}</div>', unsafe_allow_html=True)
 
         with tab2:
-            filtered_df = display_schedule_table(st.session_state.schedule_df)
+            # Table view with editing
+            st.subheader("Schedule Table")
+
+            # Edit mode toggle
+            edit_mode = st.checkbox("✏️ Edit Mode - Reassign shifts by changing dropdowns", key="edit_mode")
+
+            if edit_mode:
+                st.info("🔄 **Edit Mode Active** - Use the dropdowns in the 'Reassign To' column to change shift assignments. Changes save automatically.")
+
+            # Filters
+            col1, col2 = st.columns(2)
+            with col1:
+                filter_doctors = st.multiselect("Filter by team member:", st.session_state.doctors, default=st.session_state.doctors, key="filter_doctors")
+            with col2:
+                filter_shifts = st.multiselect("Filter by shift:", st.session_state.schedule_df['Shift'].unique(), default=st.session_state.schedule_df['Shift'].unique(), key="filter_shifts")
+
+            # Filter data
+            filtered = st.session_state.schedule_df[
+                (st.session_state.schedule_df['Doctor'].isin(filter_doctors)) &
+                (st.session_state.schedule_df['Shift'].isin(filter_shifts))
+            ].copy()
+
+            if edit_mode:
+                # Display editable table
+                st.write("**Click dropdowns to reassign shifts:**")
+
+                changes_made = False
+                for idx, row in filtered.iterrows():
+                    col1, col2, col3, col4, col5 = st.columns([2, 2, 2, 2, 2])
+
+                    with col1:
+                        st.write(f"**{row['Date']}**")
+                        st.write(f"{row['Day']}")
+
+                    with col2:
+                        st.write(f"**{row['Shift']}**")
+                        st.write(f"{row['Start_Time']} - {row['End_Time']}")
+
+                    with col3:
+                        # Current assignment
+                        current_color = st.session_state.doctor_colors.get(row['Doctor'], '#CCCCCC') if st.session_state.doctor_colors else '#CCCCCC'
+                        st.markdown(f"<div style='background: {current_color}; color: white; padding: 8px; border-radius: 5px; text-align: center; margin: 2px;'>{row['Doctor']}</div>", unsafe_allow_html=True)
+
+                    with col4:
+                        st.write("**→**")
+
+                    with col5:
+                        # Dropdown for reassignment
+                        current_doctor = row['Doctor']
+                        new_doctor = st.selectbox(
+                            "Reassign to:",
+                            options=st.session_state.doctors,
+                            index=st.session_state.doctors.index(current_doctor) if current_doctor in st.session_state.doctors else 0,
+                            key=f"reassign_{idx}_{row['Date']}_{row['Shift']}"
+                        )
+
+                        # Check for conflicts
+                        if new_doctor != current_doctor:
+                            # Check if new doctor already works this day
+                            same_day_shifts = st.session_state.schedule_df[
+                                (st.session_state.schedule_df['Date'] == row['Date']) &
+                                (st.session_state.schedule_df['Doctor'] == new_doctor)
+                            ]
+
+                            if len(same_day_shifts) > 0:
+                                st.warning(f"⚠️ {new_doctor} already works on {row['Date']}")
+
+                            # Update the schedule
+                            st.session_state.schedule_df.loc[idx, 'Doctor'] = new_doctor
+                            changes_made = True
+
+                    st.divider()
+
+                if changes_made:
+                    st.success("✅ Schedule updated! Changes are automatically saved.")
+                    time.sleep(0.5)  # Brief pause to show success message
+                    st.rerun()
+
+            else:
+                # Display regular table
+                st.dataframe(filtered, width='stretch', hide_index=True)
 
             # Export options
             st.subheader("Export Options")
             col1, col2, col3 = st.columns(3)
 
             with col1:
-                # CSV export
-                csv = filtered_df.to_csv(index=False)
-                st.download_button(
-                    label="📄 Download as CSV",
-                    data=csv,
-                    file_name=f"schedule_{selected_year}_{selected_month:02d}.csv",
-                    mime="text/csv"
-                )
+                csv = filtered.to_csv(index=False)
+                st.download_button("📄 CSV", csv, f"schedule_{year}_{month:02d}.csv", "text/csv", key="export_csv")
 
             with col2:
-                # Excel export
-                excel_buffer = create_excel_export(st.session_state.schedule_df, selected_year, selected_month)
-                st.download_button(
-                    label="📊 Download as Excel",
-                    data=excel_buffer,
-                    file_name=f"schedule_{selected_year}_{selected_month:02d}.xlsx",
-                    mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
-                )
+                excel = create_excel_export(st.session_state.schedule_df, int(year), month)
+                st.download_button("📊 Excel", excel, f"schedule_{year}_{month:02d}.xlsx", "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet", key="export_excel")
 
             with col3:
-                # ICS calendar export
-                ics_content = create_ics_export(st.session_state.schedule_df, selected_year, selected_month)
-                st.download_button(
-                    label="📅 Download as Calendar",
-                    data=ics_content,
-                    file_name=f"schedule_{selected_year}_{selected_month:02d}.ics",
-                    mime="text/calendar"
-                )
+                ics = create_ics_export(st.session_state.schedule_df)
+                st.download_button("📅 Calendar", ics, f"schedule_{year}_{month:02d}.ics", "text/calendar", key="export_ics")
 
         with tab3:
-            handle_shift_swaps()
+            # Constraints configuration with YAML editor
+            st.subheader("Scheduling Constraints")
+
+            if not st.session_state.doctors:
+                st.info("Add team members first")
+            else:
+                # Month/year for constraints
+                col1, col2 = st.columns(2)
+                with col1:
+                    const_month = st.selectbox("Month:", range(1, 13), index=datetime.now().month-1, format_func=lambda x: calendar.month_name[x], key="const_month")
+                with col2:
+                    const_year = st.number_input("Year:", min_value=2024, max_value=2030, value=datetime.now().year, key="const_year")
+
+                # Select doctor
+                selected_doctor = st.selectbox("Team member:", st.session_state.doctors, key="const_doctor")
+
+                if selected_doctor:
+                    constraints = get_doctor_constraints(selected_doctor, const_year, const_month)
+
+                    # Days off
+                    days_in_month = calendar.monthrange(const_year, const_month)[1]
+                    all_dates = [f"{const_year}-{const_month:02d}-{d:02d}" for d in range(1, days_in_month + 1)]
+
+                    days_off = st.multiselect("Days off:", all_dates, default=constraints.get('days_off', []), key="days_off")
+
+                    # Fixed shifts
+                    st.write("**Fixed Shifts:**")
+                    fixed_shifts = constraints.get('fixed_shifts', []).copy()
+
+                    # Show existing
+                    for i, fs in enumerate(fixed_shifts):
+                        col1, col2, col3 = st.columns([2, 2, 1])
+                        with col1:
+                            st.write(fs['date'])
+                        with col2:
+                            st.write(fs['shift'])
+                        with col3:
+                            if st.button("🗑️", key=f"del_fixed_{i}"):
+                                fixed_shifts.pop(i)
+                                st.rerun()
+
+                    # Add new
+                    col1, col2, col3 = st.columns([2, 2, 1])
+                    with col1:
+                        new_date = st.selectbox("Date:", all_dates, key="new_fixed_date")
+                    with col2:
+                        date_obj = datetime.strptime(new_date, "%Y-%m-%d")
+                        shifts_available = list(get_shifts_for_day(date_obj).keys())
+                        if shifts_available:
+                            new_shift = st.selectbox("Shift:", shifts_available, key="new_fixed_shift")
+                        else:
+                            st.write("No shifts configured")
+                            new_shift = None
+                    with col3:
+                        if st.button("➕", key="add_fixed") and new_shift:
+                            fixed_shifts.append({'date': new_date, 'shift': new_shift})
+                            st.rerun()
+
+                    # Save
+                    if st.button("💾 Save", key="save_constraints"):
+                        month_key = f"{const_year}-{const_month:02d}"
+                        if month_key not in st.session_state.constraints:
+                            st.session_state.constraints[month_key] = {}
+                        st.session_state.constraints[month_key][selected_doctor] = {
+                            'fixed_shifts': fixed_shifts,
+                            'days_off': days_off,
+                            'preferred_shifts': []
+                        }
+                        st.success("Constraints saved!")
+
+            st.divider()
+
+            # YAML Editor (moved from sidebar)
+            st.subheader("Advanced Configuration Editor")
+
+            if st.button("📝 Open Config Editor", key="open_editor"):
+                st.session_state.show_editor = not st.session_state.get('show_editor', False)
+
+            if st.session_state.get('show_editor', False):
+                st.write("**Edit Full Configuration (YAML format):**")
+
+                # Get current config as YAML
+                current_config = export_config()
+                current_yaml = json_to_yaml(current_config)
+
+                # YAML editor with more space
+                edited_yaml = st.text_area(
+                    "Configuration:",
+                    value=current_yaml,
+                    height=400,
+                    key="yaml_editor",
+                    help="Edit the complete configuration in YAML format. Includes team members, shifts, and constraints. Be careful with indentation!"
+                )
+
+                col1, col2, col3 = st.columns(3)
+                with col1:
+                    if st.button("💾 Apply Changes", key="apply_yaml"):
+                        try:
+                            # Convert YAML back to JSON
+                            json_content = yaml_to_json(edited_yaml)
+                            success, msg = import_config(json_content)
+                            if success:
+                                st.success("Configuration updated from YAML!")
+                                st.rerun()
+                            else:
+                                st.error(f"Error applying changes: {msg}")
+                        except Exception as e:
+                            st.error(f"Error parsing YAML: {str(e)}")
+
+                with col2:
+                    if st.button("🔄 Reset to Current", key="reset_yaml"):
+                        st.rerun()
+
+                with col3:
+                    # Download current YAML
+                    st.download_button(
+                        "📥 Download YAML",
+                        current_yaml,
+                        f"tool_sched_config_{datetime.now().strftime('%Y%m%d')}.yaml",
+                        "text/yaml",
+                        key="download_yaml_editor"
+                    )
+
+                st.info("💡 **Tip:** This editor shows the complete configuration including example constraints with set schedules, days off requests, and preferred shifts. Changes here affect everything: team members, shift patterns, and all constraints.")
 
         with tab4:
+            # Analytics
             st.subheader("Schedule Analytics")
 
-            # Doctor workload chart
+            # Workload distribution
             shifts_per_doctor = st.session_state.schedule_df['Doctor'].value_counts()
             st.bar_chart(shifts_per_doctor)
 
-            # Shift type distribution
-            st.subheader("Shift Type Distribution")
-            shift_distribution = st.session_state.schedule_df['Shift'].value_counts()
-            st.bar_chart(shift_distribution)
+            # Balance check
+            if len(shifts_per_doctor) > 0:
+                min_shifts = shifts_per_doctor.min()
+                max_shifts = shifts_per_doctor.max()
+                diff = max_shifts - min_shifts
 
-            # Daily coverage view
-            st.subheader("Daily Coverage")
-            daily_coverage = st.session_state.schedule_df.groupby('Date').size()
-            st.line_chart(daily_coverage)
+                if diff <= 1:
+                    st.success(f"✅ Well balanced (max difference: {diff})")
+                elif diff <= 2:
+                    st.info(f"📊 Reasonably balanced (max difference: {diff})")
+                else:
+                    st.warning(f"⚠️ Imbalanced (max difference: {diff})")
 
     else:
-        st.info("👈 Configure doctors and generate a schedule using the sidebar to get started!")
-
-        # Show example of what the app can do
-        st.subheader("Features")
+        st.info("👈 Configure your team and generate a schedule to get started!")
 
         col1, col2, col3 = st.columns(3)
-
         with col1:
-            st.write("**👥 Configurable Team**")
-            st.write("Add your own team members with automatically assigned random colors")
-
+            st.write("**👥 Team Management**")
+            st.write("Add team members with random color assignment")
         with col2:
-            st.write("**🔄 Shift Swapping**")
-            st.write("Team members can request to exchange shifts with colleagues")
-
+            st.write("**📋 Constraints**")
+            st.write("Set days off and fixed shifts for each team member")
         with col3:
-            st.write("**📊 Analytics**")
-            st.write("View workload distribution and schedule statistics")
+            st.write("**📊 Export Options**")
+            st.write("Download as CSV, Excel, or calendar file")
 
 if __name__ == "__main__":
     main()
