@@ -323,7 +323,7 @@ def import_config(content):
         return False, f"Error: {str(e)}"
 
 def create_excel_export(df, year, month):
-    """Create Excel export"""
+    """Create Excel export with individual cells for each shift"""
     buffer = BytesIO()
 
     with pd.ExcelWriter(buffer, engine='openpyxl') as writer:
@@ -337,37 +337,81 @@ def create_excel_export(df, year, month):
             summary_data.append({'Doctor': doctor, 'Total_Shifts': count})
         pd.DataFrame(summary_data).to_excel(writer, sheet_name='Summary', index=False)
 
-        # Calendar sheet
+        # Calendar sheet with dates in one row and shifts stacked below
         cal = calendar.monthcalendar(year, month)
-        calendar_data = [['Week'] + ['Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat', 'Sun']]
 
-        for week_num, week in enumerate(cal):
-            week_row = [f'Week {week_num + 1}']
+        # Find maximum number of shifts per day to determine how many rows we need
+        max_shifts_per_day = 0
+        for week in cal:
             for day in week:
-                if day == 0:
-                    week_row.append('')
-                else:
+                if day != 0:
                     date_str = f"{year}-{month:02d}-{day:02d}"
                     day_shifts = df[df['Date'] == date_str]
-                    cell_content = f"{day}\n"
-                    for _, shift in day_shifts.iterrows():
-                        cell_content += f"{shift['Shift']}: {shift['Doctor']}\n"
-                    week_row.append(cell_content.strip())
-            calendar_data.append(week_row)
+                    max_shifts_per_day = max(max_shifts_per_day, len(day_shifts))
 
+        # Create headers
+        headers = ['Week', 'Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat', 'Sun']
+        calendar_data = [headers]
+
+        for week_num, week in enumerate(cal):
+            # First row: Week label and dates
+            date_row = [f'Week {week_num + 1}']
+            for day in week:
+                if day == 0:
+                    date_row.append('')
+                else:
+                    date_row.append(day)
+            calendar_data.append(date_row)
+
+            # Additional rows: shifts for each day (stacked vertically)
+            for shift_level in range(max_shifts_per_day):
+                shift_row = ['']  # Empty week column for shift rows
+
+                for day in week:
+                    if day == 0:
+                        shift_row.append('')
+                    else:
+                        date_str = f"{year}-{month:02d}-{day:02d}"
+                        day_shifts = df[df['Date'] == date_str].sort_values('Start_Time')
+
+                        if shift_level < len(day_shifts):
+                            shift = day_shifts.iloc[shift_level]
+                            shift_text = f"{shift['Shift']}: {shift['Doctor'].replace('Dr. ', '')}"
+                            shift_row.append(shift_text)
+                        else:
+                            shift_row.append('')
+
+                calendar_data.append(shift_row)
+
+        # Create DataFrame and export
         cal_df = pd.DataFrame(calendar_data[1:], columns=calendar_data[0])
         cal_df.to_excel(writer, sheet_name='Calendar', index=False)
 
-        # Format calendar sheet
+        # Format the calendar sheet
         workbook = writer.book
         cal_sheet = writer.sheets['Calendar']
-        for col in range(1, 8):
-            cal_sheet.column_dimensions[chr(65 + col)].width = 20
-        for row in range(2, len(calendar_data) + 1):
-            cal_sheet.row_dimensions[row].height = 80
-            for col in range(1, 8):
-                cell = cal_sheet.cell(row=row, column=col + 1)
-                cell.alignment = Alignment(wrap_text=True, vertical='top')
+
+        # Set column widths
+        cal_sheet.column_dimensions['A'].width = 12  # Week column
+        for col in range(2, 9):  # Columns B through H (Mon-Sun)
+            col_letter = chr(64 + col)  # A=65, so B=66, etc.
+            cal_sheet.column_dimensions[col_letter].width = 18
+
+        # Set row heights and alignment
+        for row_num in range(2, len(calendar_data) + 1):
+            # First row of each week (dates) - shorter height
+            if (row_num - 2) % (max_shifts_per_day + 1) == 0:
+                cal_sheet.row_dimensions[row_num].height = 20
+            else:
+                # Shift rows - taller height
+                cal_sheet.row_dimensions[row_num].height = 18
+
+            for col_num in range(1, 9):  # A through H
+                cell = cal_sheet.cell(row=row_num, column=col_num)
+                if col_num == 1:  # Week column
+                    cell.alignment = Alignment(horizontal='left', vertical='center')
+                else:
+                    cell.alignment = Alignment(horizontal='center', vertical='center', wrap_text=True)
 
     buffer.seek(0)
     return buffer
