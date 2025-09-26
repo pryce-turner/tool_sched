@@ -5,13 +5,12 @@ from datetime import datetime, timedelta
 from collections import defaultdict
 import calendar
 import numpy as np
-import json
 import time
 from io import BytesIO
 from openpyxl.styles import Alignment
 
 # Default configuration
-DEFAULT_DOCTORS = ["Dr. Smith", "Dr. Johnson", "Dr. Williams", "Dr. Brown", "Dr. Valdez"]
+DEFAULT_DOCTORS = ["Dr. Chen", "Dr. Patel", "Dr. Johnson", "Dr. Okafor", "Dr. Valdez"]
 
 DEFAULT_SHIFTS = {
     "Monday": {
@@ -189,7 +188,7 @@ def generate_schedule(year, month, doctors):
     return pd.DataFrame(shifts)
 
 def export_config():
-    """Export configuration as JSON with examples"""
+    """Export configuration as YAML"""
     # Create example constraints if none exist
     example_constraints = {}
     if not st.session_state.constraints and st.session_state.doctors:
@@ -261,15 +260,7 @@ def export_config():
             }
         }
     }
-    return json.dumps(config, indent=2)
-
-def json_to_yaml(json_str):
-    """Convert JSON to YAML-style format"""
-    try:
-        data = json.loads(json_str)
-        return dict_to_yaml(data, 0)
-    except:
-        return json_str
+    return dict_to_yaml(config, 0)
 
 def dict_to_yaml(obj, indent=0):
     """Convert dictionary to YAML format"""
@@ -282,22 +273,27 @@ def dict_to_yaml(obj, indent=0):
                 yaml_str += f"{indent_str}{key}:\n"
                 yaml_str += dict_to_yaml(value, indent + 1)
             else:
-                yaml_str += f"{indent_str}{key}: {json.dumps(value) if isinstance(value, str) else value}\n"
+                if isinstance(value, str):
+                    # Quote strings that might be ambiguous
+                    yaml_str += f"{indent_str}{key}: \"{value}\"\n"
+                else:
+                    yaml_str += f"{indent_str}{key}: {value}\n"
     elif isinstance(obj, list):
         for item in obj:
             if isinstance(item, (dict, list)):
                 yaml_str += f"{indent_str}-\n"
                 yaml_str += dict_to_yaml(item, indent + 1)
             else:
-                yaml_str += f"{indent_str}- {json.dumps(item) if isinstance(item, str) else item}\n"
+                if isinstance(item, str):
+                    yaml_str += f"{indent_str}- \"{item}\"\n"
+                else:
+                    yaml_str += f"{indent_str}- {item}\n"
 
     return yaml_str
 
-def yaml_to_json(yaml_str):
-    """Convert YAML-style format to JSON"""
+def yaml_to_dict(yaml_str):
+    """Convert YAML-style format to dictionary"""
     try:
-        # Simple YAML to JSON conversion for basic structures
-        # This is a simplified parser - for production use a proper YAML library
         lines = yaml_str.strip().split('\n')
         result = {}
         current_dict = result
@@ -314,7 +310,7 @@ def yaml_to_json(yaml_str):
             if ':' in content and not content.startswith('-'):
                 key, value = content.split(':', 1)
                 key = key.strip().strip('"')
-                value = value.strip()
+                value = value.strip().strip('"') if value.strip() else ""
 
                 # Adjust stack based on indent level
                 while len(dict_stack) > indent_level + 1:
@@ -326,12 +322,12 @@ def yaml_to_json(yaml_str):
                 if value:
                     # Simple value
                     try:
-                        if value.startswith('"') and value.endswith('"'):
-                            current_dict[key] = value[1:-1]
-                        elif value.lower() in ['true', 'false']:
+                        if value.lower() in ['true', 'false']:
                             current_dict[key] = value.lower() == 'true'
                         elif value.isdigit():
                             current_dict[key] = int(value)
+                        elif value.replace('.', '', 1).isdigit():
+                            current_dict[key] = float(value)
                         else:
                             current_dict[key] = value
                     except:
@@ -341,21 +337,33 @@ def yaml_to_json(yaml_str):
                     current_dict[key] = {}
                     dict_stack.append(current_dict[key])
                     key_stack.append(key)
+            elif content.startswith('-'):
+                # List item
+                value = content[1:].strip().strip('"')
+                if key_stack and key_stack[-1] not in current_dict:
+                    current_dict[key_stack[-1]] = []
+                if key_stack:
+                    if isinstance(current_dict[key_stack[-1]], list):
+                        try:
+                            if value.lower() in ['true', 'false']:
+                                current_dict[key_stack[-1]].append(value.lower() == 'true')
+                            elif value.isdigit():
+                                current_dict[key_stack[-1]].append(int(value))
+                            elif value.replace('.', '', 1).isdigit():
+                                current_dict[key_stack[-1]].append(float(value))
+                            else:
+                                current_dict[key_stack[-1]].append(value)
+                        except:
+                            current_dict[key_stack[-1]].append(value)
 
-        return json.dumps(result, indent=2)
+        return result
     except Exception as e:
-        return f"Error parsing YAML: {str(e)}"
+        raise Exception(f"Error parsing YAML: {str(e)}")
 
 def import_config(content):
-    """Import configuration from JSON or YAML"""
+    """Import configuration from YAML"""
     try:
-        # Try JSON first
-        if content.strip().startswith('{'):
-            config = json.loads(content)
-        else:
-            # Convert YAML to JSON first
-            json_content = yaml_to_json(content)
-            config = json.loads(json_content)
+        config = yaml_to_dict(content)
 
         if 'team_members' in config:
             st.session_state.doctors = config['team_members']
@@ -512,26 +520,17 @@ def main():
 
         # Export
         if st.session_state.doctors or st.session_state.constraints:
-            config_json = export_config()
+            config_yaml = export_config()
             st.download_button(
-                "📥 Export Config (JSON)",
-                config_json,
-                f"tool_sched_config_{datetime.now().strftime('%Y%m%d')}.json",
-                "application/json",
-                key="export_config"
-            )
-
-            config_yaml = json_to_yaml(config_json)
-            st.download_button(
-                "📥 Export Config (YAML)",
+                "📥 Export Config",
                 config_yaml,
                 f"tool_sched_config_{datetime.now().strftime('%Y%m%d')}.yaml",
                 "text/yaml",
-                key="export_yaml"
+                key="export_config"
             )
 
         # Import
-        uploaded = st.file_uploader("📤 Import Config", type=['json', 'yaml', 'yml'], key="import_config")
+        uploaded = st.file_uploader("📤 Import Config", type=['yaml', 'yml'], key="import_config")
         if uploaded:
             content = uploaded.read().decode('utf-8')
             success, msg = import_config(content)
@@ -791,8 +790,7 @@ def main():
                 st.write("**Edit Full Configuration (YAML format):**")
 
                 # Get current config as YAML
-                current_config = export_config()
-                current_yaml = json_to_yaml(current_config)
+                current_yaml = export_config()
 
                 # YAML editor with more space
                 edited_yaml = st.text_area(
@@ -807,9 +805,8 @@ def main():
                 with col1:
                     if st.button("💾 Apply Changes", key="apply_yaml"):
                         try:
-                            # Convert YAML back to JSON
-                            json_content = yaml_to_json(edited_yaml)
-                            success, msg = import_config(json_content)
+                            config = yaml_to_dict(edited_yaml)
+                            success, msg = import_config(edited_yaml)
                             if success:
                                 st.success("Configuration updated from YAML!")
                                 st.rerun()
