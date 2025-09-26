@@ -29,7 +29,7 @@ A collaborative scheduling system for any team built with Streamlit. Generate fa
 
 ### Prerequisites
 - Python 3.7 or higher
-- pip package manager
+- [uv](https://docs.astral.sh/uv/) package manager
 
 ### Installation
 
@@ -41,12 +41,12 @@ A collaborative scheduling system for any team built with Streamlit. Generate fa
 
 2. **Install dependencies**
    ```bash
-   pip install streamlit pandas pyyaml openpyxl
+   uv add streamlit pandas pyyaml openpyxl
    ```
 
 3. **Run the application**
    ```bash
-   streamlit run tool_sched.py
+   uv run streamlit run main.py
    ```
 
 4. **Open your browser** to `http://localhost:8501`
