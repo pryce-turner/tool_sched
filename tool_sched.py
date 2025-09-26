@@ -5,6 +5,7 @@ from datetime import datetime, timedelta
 from collections import defaultdict
 import calendar
 import numpy as np
+import yaml
 import time
 from io import BytesIO
 from openpyxl.styles import Alignment
@@ -260,7 +261,7 @@ def export_config():
             }
         }
     }
-    return dict_to_yaml(config, 0)
+    return yaml.dump(config, default_flow_style=False, sort_keys=False)
 
 def dict_to_yaml(obj, indent=0):
     """Convert dictionary to YAML format"""
@@ -269,26 +270,38 @@ def dict_to_yaml(obj, indent=0):
 
     if isinstance(obj, dict):
         for key, value in obj.items():
-            if isinstance(value, (dict, list)):
+            if isinstance(value, dict):
                 yaml_str += f"{indent_str}{key}:\n"
                 yaml_str += dict_to_yaml(value, indent + 1)
+            elif isinstance(value, list):
+                yaml_str += f"{indent_str}{key}:\n"
+                for item in value:
+                    if isinstance(item, dict):
+                        # For dict items in lists, use inline format for simple dicts
+                        if len(item) <= 3 and all(isinstance(v, (str, int, float, bool)) for v in item.values()):
+                            # Inline format for simple dicts like {date: "2024-01-01", shift: "7a-7p"}
+                            pairs = []
+                            for k, v in item.items():
+                                if isinstance(v, str):
+                                    pairs.append(f'{k}: "{v}"')
+                                else:
+                                    pairs.append(f'{k}: {v}')
+                            yaml_str += f"{indent_str}  - {{{', '.join(pairs)}}}\n"
+                        else:
+                            # Multi-line format for complex dicts
+                            yaml_str += f"{indent_str}  -\n"
+                            yaml_str += dict_to_yaml(item, indent + 2)
+                    else:
+                        if isinstance(item, str):
+                            yaml_str += f'{indent_str}  - "{item}"\n'
+                        else:
+                            yaml_str += f"{indent_str}  - {item}\n"
             else:
                 if isinstance(value, str):
-                    # Quote strings that might be ambiguous
-                    yaml_str += f"{indent_str}{key}: \"{value}\"\n"
+                    yaml_str += f'{indent_str}{key}: "{value}"\n'
                 else:
                     yaml_str += f"{indent_str}{key}: {value}\n"
-    elif isinstance(obj, list):
-        for item in obj:
-            if isinstance(item, (dict, list)):
-                yaml_str += f"{indent_str}-\n"
-                yaml_str += dict_to_yaml(item, indent + 1)
-            else:
-                if isinstance(item, str):
-                    yaml_str += f"{indent_str}- \"{item}\"\n"
-                else:
-                    yaml_str += f"{indent_str}- {item}\n"
-
+    
     return yaml_str
 
 def yaml_to_dict(yaml_str):
@@ -296,34 +309,83 @@ def yaml_to_dict(yaml_str):
     try:
         lines = yaml_str.strip().split('\n')
         result = {}
-        current_dict = result
-        dict_stack = [result]
-        key_stack = []
-
+        stack = [result]
+        current_key = None
+        
         for line in lines:
-            if line.strip().startswith('#') or not line.strip():
+            stripped = line.strip()
+            if not stripped or stripped.startswith('#'):
                 continue
-
-            indent_level = (len(line) - len(line.lstrip())) // 2
-            content = line.strip()
-
-            if ':' in content and not content.startswith('-'):
-                key, value = content.split(':', 1)
+                
+            # Calculate indentation level
+            indent = len(line) - len(line.lstrip())
+            level = indent // 2
+            
+            # Adjust stack to current level
+            while len(stack) > level + 1:
+                stack.pop()
+                
+            current_dict = stack[-1]
+            
+            if stripped.startswith('-'):
+                # List item
+                item_value = stripped[1:].strip()
+                if item_value.startswith('{') and item_value.endswith('}'):
+                    # Inline dict in list
+                    dict_item = {}
+                    # Parse simple inline dict like {date: "2024-01-01", shift: "7a-7p"}
+                    content = item_value[1:-1]
+                    pairs = []
+                    current_pair = ""
+                    in_quotes = False
+                    for char in content:
+                        if char == '"' and (not current_pair or current_pair[-1] != '\\'):
+                            in_quotes = not in_quotes
+                        elif char == ',' and not in_quotes:
+                            pairs.append(current_pair.strip())
+                            current_pair = ""
+                            continue
+                        current_pair += char
+                    if current_pair.strip():
+                        pairs.append(current_pair.strip())
+                    
+                    for pair in pairs:
+                        if ':' in pair:
+                            k, v = pair.split(':', 1)
+                            k = k.strip().strip('"')
+                            v = v.strip().strip('"')
+                            dict_item[k] = v
+                    
+                    if current_key and current_key in current_dict:
+                        if not isinstance(current_dict[current_key], list):
+                            current_dict[current_key] = []
+                        current_dict[current_key].append(dict_item)
+                else:
+                    # Simple list item
+                    item_value = item_value.strip('"')
+                    if current_key and current_key in current_dict:
+                        if not isinstance(current_dict[current_key], list):
+                            current_dict[current_key] = []
+                        current_dict[current_key].append(item_value)
+                        
+            elif ':' in stripped:
+                # Key-value pair
+                key, value = stripped.split(':', 1)
                 key = key.strip().strip('"')
-                value = value.strip().strip('"') if value.strip() else ""
-
-                # Adjust stack based on indent level
-                while len(dict_stack) > indent_level + 1:
-                    dict_stack.pop()
-                    key_stack.pop()
-
-                current_dict = dict_stack[-1]
-
-                if value:
-                    # Simple value
+                value = value.strip().strip('"')
+                current_key = key
+                
+                if not value:
+                    # Empty value means nested structure or list coming
+                    current_dict[key] = {}
+                    stack.append(current_dict[key])
+                else:
+                    # Direct value
                     try:
-                        if value.lower() in ['true', 'false']:
-                            current_dict[key] = value.lower() == 'true'
+                        if value.lower() == 'true':
+                            current_dict[key] = True
+                        elif value.lower() == 'false':
+                            current_dict[key] = False
                         elif value.isdigit():
                             current_dict[key] = int(value)
                         elif value.replace('.', '', 1).isdigit():
@@ -332,30 +394,7 @@ def yaml_to_dict(yaml_str):
                             current_dict[key] = value
                     except:
                         current_dict[key] = value
-                else:
-                    # Nested object
-                    current_dict[key] = {}
-                    dict_stack.append(current_dict[key])
-                    key_stack.append(key)
-            elif content.startswith('-'):
-                # List item
-                value = content[1:].strip().strip('"')
-                if key_stack and key_stack[-1] not in current_dict:
-                    current_dict[key_stack[-1]] = []
-                if key_stack:
-                    if isinstance(current_dict[key_stack[-1]], list):
-                        try:
-                            if value.lower() in ['true', 'false']:
-                                current_dict[key_stack[-1]].append(value.lower() == 'true')
-                            elif value.isdigit():
-                                current_dict[key_stack[-1]].append(int(value))
-                            elif value.replace('.', '', 1).isdigit():
-                                current_dict[key_stack[-1]].append(float(value))
-                            else:
-                                current_dict[key_stack[-1]].append(value)
-                        except:
-                            current_dict[key_stack[-1]].append(value)
-
+        
         return result
     except Exception as e:
         raise Exception(f"Error parsing YAML: {str(e)}")
@@ -363,19 +402,32 @@ def yaml_to_dict(yaml_str):
 def import_config(content):
     """Import configuration from YAML"""
     try:
-        config = yaml_to_dict(content)
-
-        if 'team_members' in config:
+        config = yaml.safe_load(content)
+        
+        # Debug: Show what was parsed
+        imported_items = []
+        
+        if 'team_members' in config and config['team_members']:
             st.session_state.doctors = config['team_members']
             st.session_state.doctor_colors = generate_colors(st.session_state.doctors)
+            imported_items.append(f"Team members: {len(config['team_members'])} members")
 
-        if 'shift_configuration' in config:
+        if 'shift_configuration' in config and config['shift_configuration']:
             st.session_state.shift_config = config['shift_configuration']
+            imported_items.append("Shift configuration")
 
-        if 'constraints' in config:
+        if 'constraints' in config and config['constraints']:
             st.session_state.constraints = config['constraints']
+            constraint_count = sum(len(month_constraints) for month_constraints in config['constraints'].values())
+            imported_items.append(f"Constraints: {constraint_count} member-month combinations")
 
-        return True, "Configuration imported successfully!"
+        if imported_items:
+            return True, f"Successfully imported: {', '.join(imported_items)}"
+        else:
+            return False, "No valid configuration data found in file"
+            
+    except yaml.YAMLError as e:
+        return False, f"YAML parsing error: {str(e)}"
     except Exception as e:
         return False, f"Error: {str(e)}"
 
@@ -531,14 +583,26 @@ def main():
 
         # Import
         uploaded = st.file_uploader("📤 Import Config", type=['yaml', 'yml'], key="import_config")
-        if uploaded:
-            content = uploaded.read().decode('utf-8')
-            success, msg = import_config(content)
-            if success:
-                st.success(msg)
-                st.rerun()
-            else:
-                st.error(msg)
+        if uploaded is not None:
+            try:
+                content = uploaded.read().decode('utf-8')
+                success, msg = import_config(content)
+                
+                if success:
+                    st.success(msg)
+                    # Clear the file uploader by forcing a rerun after successful import
+                    if st.session_state.get('import_success') != uploaded.file_id:
+                        st.session_state.import_success = uploaded.file_id
+                        time.sleep(0.5)
+                        st.rerun()
+                else:
+                    st.error(msg)
+            except Exception as e:
+                st.error(f"Error reading file: {str(e)}")
+        
+        # Clear import success flag if no file is uploaded
+        if uploaded is None and 'import_success' in st.session_state:
+            del st.session_state.import_success
 
         st.divider()
 
@@ -805,7 +869,6 @@ def main():
                 with col1:
                     if st.button("💾 Apply Changes", key="apply_yaml"):
                         try:
-                            config = yaml_to_dict(edited_yaml)
                             success, msg = import_config(edited_yaml)
                             if success:
                                 st.success("Configuration updated from YAML!")
