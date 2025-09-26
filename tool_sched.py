@@ -96,34 +96,44 @@ def get_shifts_for_day(date):
 def get_doctor_constraints(doctor, year, month):
     """Get constraints for a doctor in a specific month"""
     month_key = f"{year}-{month:02d}"
-    return st.session_state.constraints.get(month_key, {}).get(doctor, {
-        'fixed_shifts': [],
-        'days_off': [],
-        'preferred_shifts': []
-    })
+    doctor_constraints = st.session_state.constraints.get(doctor, {})
+
+    constraints = {
+        'fixed_shifts': doctor_constraints.get('fixed_shifts', {}),  # Day of week based
+        'days_off': doctor_constraints.get(month_key, {}).get('days_off', []),  # Month specific
+    }
+
+    return constraints
 
 def is_available(doctor, date_str, shift_name, year, month):
     """Check if doctor is available"""
     constraints = get_doctor_constraints(doctor, year, month)
 
     # Check days off
-    if date_str in constraints.get('days_off', []):
+    days_off = constraints.get('days_off', [])
+    if days_off and date_str in days_off:
         return False
 
-    # Check fixed shifts
-    for fixed in constraints.get('fixed_shifts', []):
-        if fixed['date'] == date_str and fixed['shift'] != shift_name:
-            return False
+    # Check fixed shifts by day of week
+    date_obj = datetime.strptime(date_str, '%Y-%m-%d')
+    day_of_week = date_obj.strftime('%A')
+    fixed_shifts = constraints.get('fixed_shifts', {})
+
+    if day_of_week in fixed_shifts and fixed_shifts[day_of_week] != shift_name:
+        return False
 
     return True
 
 def get_fixed_shift(doctor, date_str, year, month):
     """Get fixed shift for doctor on date"""
     constraints = get_doctor_constraints(doctor, year, month)
-    for fixed in constraints.get('fixed_shifts', []):
-        if fixed['date'] == date_str:
-            return fixed['shift']
-    return None
+
+    # Check fixed shifts by day of week
+    date_obj = datetime.strptime(date_str, '%Y-%m-%d')
+    day_of_week = date_obj.strftime('%A')
+    fixed_shifts = constraints.get('fixed_shifts', {})
+
+    return fixed_shifts.get(day_of_week)
 
 def generate_schedule(year, month, doctors):
     """Generate monthly schedule"""
@@ -195,55 +205,53 @@ def export_config():
     if not st.session_state.constraints and st.session_state.doctors:
         current_date = datetime.now()
         month_key = f"{current_date.year}-{current_date.month:02d}"
-        days_in_month = calendar.monthrange(current_date.year, current_date.month)[1]
 
-        example_constraints[month_key] = {}
-
-        # Example for first doctor - has set schedule
+        # Example for first doctor - has set weekly schedule
         if len(st.session_state.doctors) > 0:
             doctor1 = st.session_state.doctors[0]
-            example_constraints[month_key][doctor1] = {
-                "fixed_shifts": [
-                    {"date": f"{current_date.year}-{current_date.month:02d}-01", "shift": "7a-7p"},
-                    {"date": f"{current_date.year}-{current_date.month:02d}-08", "shift": "7a-7p"},
-                    {"date": f"{current_date.year}-{current_date.month:02d}-15", "shift": "7a-7p"},
-                    {"date": f"{current_date.year}-{current_date.month:02d}-22", "shift": "7a-7p"}
-                ],
-                "days_off": [
-                    f"{current_date.year}-{current_date.month:02d}-05",
-                    f"{current_date.year}-{current_date.month:02d}-12"
-                ],
-                "preferred_shifts": ["7a-7p", "12p-12a"],
-                "notes": "Works every Monday, prefers day shifts"
+            example_constraints[doctor1] = {
+                "fixed_shifts": {
+                    "Monday": "7a-7p",
+                    "Wednesday": "7a-7p",
+                    "Friday": "7a-7p"
+                },
+                month_key: {
+                    "days_off": [
+                        f"{current_date.year}-{current_date.month:02d}-05",
+                        f"{current_date.year}-{current_date.month:02d}-12"
+                    ]
+                },
+                "notes": "Works Monday/Wednesday/Friday day shifts, prefers day shifts"
             }
 
         # Example for second doctor - has days off requests
         if len(st.session_state.doctors) > 1:
             doctor2 = st.session_state.doctors[1]
-            example_constraints[month_key][doctor2] = {
-                "fixed_shifts": [],
-                "days_off": [
-                    f"{current_date.year}-{current_date.month:02d}-10",
-                    f"{current_date.year}-{current_date.month:02d}-11",
-                    f"{current_date.year}-{current_date.month:02d}-25"
-                ],
-                "preferred_shifts": ["10a-10p", "2p-2a"],
+            example_constraints[doctor2] = {
+                "fixed_shifts": {},
+                month_key: {
+                    "days_off": [
+                        f"{current_date.year}-{current_date.month:02d}-10",
+                        f"{current_date.year}-{current_date.month:02d}-11",
+                        f"{current_date.year}-{current_date.month:02d}-25"
+                    ]
+                },
                 "notes": "Prefers weekend shifts, vacation mid-month"
             }
 
         # Example for third doctor - night shift specialist
         if len(st.session_state.doctors) > 2:
             doctor3 = st.session_state.doctors[2]
-            example_constraints[month_key][doctor3] = {
-                "fixed_shifts": [
-                    {"date": f"{current_date.year}-{current_date.month:02d}-02", "shift": "7p-7a"},
-                    {"date": f"{current_date.year}-{current_date.month:02d}-09", "shift": "7p-7a"},
-                    {"date": f"{current_date.year}-{current_date.month:02d}-16", "shift": "7p-7a"},
-                    {"date": f"{current_date.year}-{current_date.month:02d}-23", "shift": "7p-7a"}
-                ],
-                "days_off": [],
-                "preferred_shifts": ["7p-7a", "2p-2a"],
-                "notes": "Night shift specialist, works every Tuesday night"
+            example_constraints[doctor3] = {
+                "fixed_shifts": {
+                    "Tuesday": "7p-7a",
+                    "Thursday": "7p-7a",
+                    "Saturday": "7p-7a"
+                },
+                month_key: {
+                    "days_off": []
+                },
+                "notes": "Night shift specialist, works Tuesday/Thursday/Saturday nights"
             }
 
     config = {
@@ -252,161 +260,24 @@ def export_config():
         'constraints': st.session_state.constraints or example_constraints,
         'export_date': datetime.now().isoformat(),
         'examples': {
-            'description': 'This configuration includes example constraints',
+            'description': 'Simplified configuration with day-of-week fixed shifts',
             'constraint_types': {
-                'fixed_shifts': 'Specific shift assignments that must be honored',
-                'days_off': 'Dates when the team member is unavailable',
-                'preferred_shifts': 'Shift types the team member prefers to work',
+                'fixed_shifts': 'Day of week assignments (e.g., Monday: "7a-7p") - portable across months',
+                'days_off': 'Specific dates when unavailable (month-specific under YYYY-MM key)',
                 'notes': 'Additional information about the team member'
             }
         }
     }
     return yaml.dump(config, default_flow_style=False, sort_keys=False)
 
-def dict_to_yaml(obj, indent=0):
-    """Convert dictionary to YAML format"""
-    yaml_str = ""
-    indent_str = "  " * indent
-
-    if isinstance(obj, dict):
-        for key, value in obj.items():
-            if isinstance(value, dict):
-                yaml_str += f"{indent_str}{key}:\n"
-                yaml_str += dict_to_yaml(value, indent + 1)
-            elif isinstance(value, list):
-                yaml_str += f"{indent_str}{key}:\n"
-                for item in value:
-                    if isinstance(item, dict):
-                        # For dict items in lists, use inline format for simple dicts
-                        if len(item) <= 3 and all(isinstance(v, (str, int, float, bool)) for v in item.values()):
-                            # Inline format for simple dicts like {date: "2024-01-01", shift: "7a-7p"}
-                            pairs = []
-                            for k, v in item.items():
-                                if isinstance(v, str):
-                                    pairs.append(f'{k}: "{v}"')
-                                else:
-                                    pairs.append(f'{k}: {v}')
-                            yaml_str += f"{indent_str}  - {{{', '.join(pairs)}}}\n"
-                        else:
-                            # Multi-line format for complex dicts
-                            yaml_str += f"{indent_str}  -\n"
-                            yaml_str += dict_to_yaml(item, indent + 2)
-                    else:
-                        if isinstance(item, str):
-                            yaml_str += f'{indent_str}  - "{item}"\n'
-                        else:
-                            yaml_str += f"{indent_str}  - {item}\n"
-            else:
-                if isinstance(value, str):
-                    yaml_str += f'{indent_str}{key}: "{value}"\n'
-                else:
-                    yaml_str += f"{indent_str}{key}: {value}\n"
-    
-    return yaml_str
-
-def yaml_to_dict(yaml_str):
-    """Convert YAML-style format to dictionary"""
-    try:
-        lines = yaml_str.strip().split('\n')
-        result = {}
-        stack = [result]
-        current_key = None
-        
-        for line in lines:
-            stripped = line.strip()
-            if not stripped or stripped.startswith('#'):
-                continue
-                
-            # Calculate indentation level
-            indent = len(line) - len(line.lstrip())
-            level = indent // 2
-            
-            # Adjust stack to current level
-            while len(stack) > level + 1:
-                stack.pop()
-                
-            current_dict = stack[-1]
-            
-            if stripped.startswith('-'):
-                # List item
-                item_value = stripped[1:].strip()
-                if item_value.startswith('{') and item_value.endswith('}'):
-                    # Inline dict in list
-                    dict_item = {}
-                    # Parse simple inline dict like {date: "2024-01-01", shift: "7a-7p"}
-                    content = item_value[1:-1]
-                    pairs = []
-                    current_pair = ""
-                    in_quotes = False
-                    for char in content:
-                        if char == '"' and (not current_pair or current_pair[-1] != '\\'):
-                            in_quotes = not in_quotes
-                        elif char == ',' and not in_quotes:
-                            pairs.append(current_pair.strip())
-                            current_pair = ""
-                            continue
-                        current_pair += char
-                    if current_pair.strip():
-                        pairs.append(current_pair.strip())
-                    
-                    for pair in pairs:
-                        if ':' in pair:
-                            k, v = pair.split(':', 1)
-                            k = k.strip().strip('"')
-                            v = v.strip().strip('"')
-                            dict_item[k] = v
-                    
-                    if current_key and current_key in current_dict:
-                        if not isinstance(current_dict[current_key], list):
-                            current_dict[current_key] = []
-                        current_dict[current_key].append(dict_item)
-                else:
-                    # Simple list item
-                    item_value = item_value.strip('"')
-                    if current_key and current_key in current_dict:
-                        if not isinstance(current_dict[current_key], list):
-                            current_dict[current_key] = []
-                        current_dict[current_key].append(item_value)
-                        
-            elif ':' in stripped:
-                # Key-value pair
-                key, value = stripped.split(':', 1)
-                key = key.strip().strip('"')
-                value = value.strip().strip('"')
-                current_key = key
-                
-                if not value:
-                    # Empty value means nested structure or list coming
-                    current_dict[key] = {}
-                    stack.append(current_dict[key])
-                else:
-                    # Direct value
-                    try:
-                        if value.lower() == 'true':
-                            current_dict[key] = True
-                        elif value.lower() == 'false':
-                            current_dict[key] = False
-                        elif value.isdigit():
-                            current_dict[key] = int(value)
-                        elif value.replace('.', '', 1).isdigit():
-                            current_dict[key] = float(value)
-                        else:
-                            current_dict[key] = value
-                    except:
-                        current_dict[key] = value
-        
-        return result
-    except Exception as e:
-        raise Exception(f"Error parsing YAML: {str(e)}")
-
 def import_config(content):
     """Import configuration from YAML"""
     try:
         config = yaml.safe_load(content)
-        
+
         # Debug: Show what was parsed
         imported_items = []
-        
+
         if 'team_members' in config and config['team_members']:
             st.session_state.doctors = config['team_members']
             st.session_state.doctor_colors = generate_colors(st.session_state.doctors)
@@ -418,14 +289,34 @@ def import_config(content):
 
         if 'constraints' in config and config['constraints']:
             st.session_state.constraints = config['constraints']
-            constraint_count = sum(len(month_constraints) for month_constraints in config['constraints'].values())
-            imported_items.append(f"Constraints: {constraint_count} member-month combinations")
+
+            # Count constraints
+            fixed_shifts_count = sum(1 for doctor_constraints in config['constraints'].values()
+                                   if isinstance(doctor_constraints, dict) and doctor_constraints.get('fixed_shifts'))
+
+            days_off_count = 0
+            for doctor_constraints in config['constraints'].values():
+                if isinstance(doctor_constraints, dict):
+                    for month_key, month_data in doctor_constraints.items():
+                        if month_key.count('-') == 1 and isinstance(month_data, dict):  # YYYY-MM format
+                            days_off = month_data.get('days_off', [])
+                            if days_off:
+                                days_off_count += len(days_off)
+
+            constraint_details = []
+            if fixed_shifts_count > 0:
+                constraint_details.append(f"{fixed_shifts_count} weekly schedules")
+            if days_off_count > 0:
+                constraint_details.append(f"{days_off_count} days off")
+
+            if constraint_details:
+                imported_items.append(f"Constraints: {', '.join(constraint_details)}")
 
         if imported_items:
             return True, f"Successfully imported: {', '.join(imported_items)}"
         else:
             return False, "No valid configuration data found in file"
-            
+
     except yaml.YAMLError as e:
         return False, f"YAML parsing error: {str(e)}"
     except Exception as e:
@@ -587,7 +478,7 @@ def main():
             try:
                 content = uploaded.read().decode('utf-8')
                 success, msg = import_config(content)
-                
+
                 if success:
                     st.success(msg)
                     # Clear the file uploader by forcing a rerun after successful import
@@ -599,7 +490,7 @@ def main():
                     st.error(msg)
             except Exception as e:
                 st.error(f"Error reading file: {str(e)}")
-        
+
         # Clear import success flag if no file is uploaded
         if uploaded is None and 'import_success' in st.session_state:
             del st.session_state.import_success
@@ -772,13 +663,13 @@ def main():
                 st.download_button("📅 Calendar", ics, f"schedule_{year}_{month:02d}.ics", "text/calendar", key="export_ics")
 
         with tab3:
-            # Constraints configuration with YAML editor
+            # Constraints configuration
             st.subheader("Scheduling Constraints")
 
             if not st.session_state.doctors:
                 st.info("Add team members first")
             else:
-                # Month/year for constraints
+                # Month/year for constraints (for days off only)
                 col1, col2 = st.columns(2)
                 with col1:
                     const_month = st.selectbox("Month:", range(1, 13), index=datetime.now().month-1, format_func=lambda x: calendar.month_name[x], key="const_month")
@@ -789,62 +680,96 @@ def main():
                 selected_doctor = st.selectbox("Team member:", st.session_state.doctors, key="const_doctor")
 
                 if selected_doctor:
-                    constraints = get_doctor_constraints(selected_doctor, const_year, const_month)
+                    # Get doctor's constraints
+                    doctor_constraints = st.session_state.constraints.get(selected_doctor, {})
+                    month_key = f"{const_year}-{const_month:02d}"
+                    month_constraints = doctor_constraints.get(month_key, {})
 
-                    # Days off
+                    # Days off (month-specific)
                     days_in_month = calendar.monthrange(const_year, const_month)[1]
                     all_dates = [f"{const_year}-{const_month:02d}-{d:02d}" for d in range(1, days_in_month + 1)]
+                    days_off = st.multiselect("Days off:", all_dates, default=month_constraints.get('days_off', []), key="days_off")
 
-                    days_off = st.multiselect("Days off:", all_dates, default=constraints.get('days_off', []), key="days_off")
+                    # Fixed shifts (day of week based)
+                    st.write("**Fixed Weekly Schedule:**")
+                    st.write("*Recurring shifts by day of the week (portable across months)*")
 
-                    # Fixed shifts
-                    st.write("**Fixed Shifts:**")
-                    fixed_shifts = constraints.get('fixed_shifts', []).copy()
+                    current_fixed = doctor_constraints.get('fixed_shifts', {})
+                    fixed_shifts = {}
 
-                    # Show existing
-                    for i, fs in enumerate(fixed_shifts):
-                        col1, col2, col3 = st.columns([2, 2, 1])
-                        with col1:
-                            st.write(fs['date'])
-                        with col2:
-                            st.write(fs['shift'])
-                        with col3:
-                            if st.button("🗑️", key=f"del_fixed_{i}"):
-                                fixed_shifts.pop(i)
-                                st.rerun()
+                    days = ['Monday', 'Tuesday', 'Wednesday', 'Thursday', 'Friday', 'Saturday', 'Sunday']
 
-                    # Add new
-                    col1, col2, col3 = st.columns([2, 2, 1])
-                    with col1:
-                        new_date = st.selectbox("Date:", all_dates, key="new_fixed_date")
-                    with col2:
-                        date_obj = datetime.strptime(new_date, "%Y-%m-%d")
-                        shifts_available = list(get_shifts_for_day(date_obj).keys())
-                        if shifts_available:
-                            new_shift = st.selectbox("Shift:", shifts_available, key="new_fixed_shift")
-                        else:
-                            st.write("No shifts configured")
-                            new_shift = None
-                    with col3:
-                        if st.button("➕", key="add_fixed") and new_shift:
-                            fixed_shifts.append({'date': new_date, 'shift': new_shift})
-                            st.rerun()
+                    for day in days:
+                        # Get available shifts for this day (from shift config)
+                        day_shifts = st.session_state.shift_config.get(day, {})
+                        shift_options = ['None'] + list(day_shifts.keys())
+
+                        current_value = current_fixed.get(day, 'None')
+                        if current_value and current_value not in shift_options:
+                            shift_options.append(current_value)
+
+                        selected_shift = st.selectbox(
+                            f"{day}:",
+                            options=shift_options,
+                            index=shift_options.index(current_value) if current_value in shift_options else 0,
+                            key=f"fixed_{day}"
+                        )
+
+                        if selected_shift != 'None':
+                            fixed_shifts[day] = selected_shift
 
                     # Save
                     if st.button("💾 Save", key="save_constraints"):
-                        month_key = f"{const_year}-{const_month:02d}"
-                        if month_key not in st.session_state.constraints:
-                            st.session_state.constraints[month_key] = {}
-                        st.session_state.constraints[month_key][selected_doctor] = {
-                            'fixed_shifts': fixed_shifts,
-                            'days_off': days_off,
-                            'preferred_shifts': []
-                        }
+                        if selected_doctor not in st.session_state.constraints:
+                            st.session_state.constraints[selected_doctor] = {}
+
+                        # Save fixed shifts (day of week based)
+                        st.session_state.constraints[selected_doctor]['fixed_shifts'] = fixed_shifts
+
+                        # Save days off (month specific)
+                        if month_key not in st.session_state.constraints[selected_doctor]:
+                            st.session_state.constraints[selected_doctor][month_key] = {}
+                        st.session_state.constraints[selected_doctor][month_key]['days_off'] = days_off
+
                         st.success("Constraints saved!")
+
+                st.divider()
+
+                # Show all constraints summary
+                if st.session_state.constraints:
+                    st.subheader("📋 Current Constraints Summary")
+                    for doctor, doctor_constraints in st.session_state.constraints.items():
+                        with st.expander(f"📝 {doctor}"):
+                            # Fixed shifts (day of week)
+                            fixed_shifts = doctor_constraints.get('fixed_shifts', {})
+                            if fixed_shifts:
+                                st.write("**Fixed weekly schedule:**")
+                                for day, shift in fixed_shifts.items():
+                                    st.write(f"  • {day}: {shift}")
+
+                            # Days off (month specific)
+                            has_days_off = False
+                            for month_key, month_data in doctor_constraints.items():
+                                if month_key.count('-') == 1 and isinstance(month_data, dict):  # YYYY-MM format
+                                    days_off = month_data.get('days_off', [])
+                                    if days_off:
+                                        if not has_days_off:
+                                            st.write("**Days off:**")
+                                            has_days_off = True
+                                        month_name = datetime.strptime(month_key + "-01", "%Y-%m-%d").strftime("%B %Y")
+                                        st.write(f"  • {month_name}: {', '.join(days_off)}")
+
+                            # Notes
+                            notes = doctor_constraints.get('notes', '')
+                            if notes:
+                                st.write(f"**Notes:** {notes}")
+
+                            if not fixed_shifts and not has_days_off and not notes:
+                                st.write("No constraints set")
 
             st.divider()
 
-            # YAML Editor (moved from sidebar)
+            # YAML Editor
             st.subheader("Advanced Configuration Editor")
 
             if st.button("📝 Open Config Editor", key="open_editor"):
@@ -892,7 +817,7 @@ def main():
                         key="download_yaml_editor"
                     )
 
-                st.info("💡 **Tip:** This editor shows the complete configuration including example constraints with set schedules, days off requests, and preferred shifts. Changes here affect everything: team members, shift patterns, and all constraints.")
+                st.info("💡 **Tip:** This editor shows the complete configuration including example constraints with set schedules, days off requests, and notes. Changes here affect everything: team members, shift patterns, and all constraints.")
 
         with tab4:
             # Analytics
